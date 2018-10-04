@@ -1,0 +1,19 @@
+groups:
+- name: prometheus/alerts/dnssec.rules
+  rules:
+  - alert: DNSSECSignatureExpiration
+    expr: dnssec_zone_record_days_left < 10
+    for: 1m
+    labels:
+      urgency: immediate
+    annotations:
+      description: The DNSSEC signature for the {{$labels.record}} in {{$labels.zone}} type {{$labels.type}}) expires in {{$value}} day(s)
+      title: The DNSSEC signature for the {{$labels.record}} in {{$labels.zone}} is expiring
+  - alert: DNSSECSignatureInvalid
+    expr: dnssec_zone_record_valid == 0
+    for: 1m
+    labels:
+      urgency: immediate
+    annotations:
+      description: The DNSSEC signature for the {{$labels.record}} in {{$labels.zone}} type {{$labels.type}}) is invalid
+      title: The DNSSEC signature for the {{$labels.record}} in {{$labels.zone}} is invalid

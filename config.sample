@@ -1,0 +1,9 @@
+[[records]]
+  zone = "ietf.org"
+  record = "@"
+  type = "SOA"
+
+[[records]]
+  zone = "verisigninc.com"
+  record = "@"
+  type = "SOA"
