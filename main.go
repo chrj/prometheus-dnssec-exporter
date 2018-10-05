@@ -43,7 +43,7 @@ type Exporter struct {
 	logger Logger
 }
 
-func NewDNSSECExporter(dnsClient *dns.Client, resolver string, logger Logger) *Exporter {
+func NewDNSSECExporter(timeout time.Duration, resolver string, logger Logger) *Exporter {
 	return &Exporter{
 		records: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -71,9 +71,12 @@ func NewDNSSECExporter(dnsClient *dns.Client, resolver string, logger Logger) *E
 				"type",
 			},
 		),
-		dnsClient: dnsClient,
-		resolver:  resolver,
-		logger:    logger,
+		dnsClient: &dns.Client{
+			Net:     "tcp",
+			Timeout: timeout,
+		},
+		resolver: resolver,
+		logger:   logger,
 	}
 }
 
@@ -226,10 +229,7 @@ func main() {
 
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 
-	exporter := NewDNSSECExporter(&dns.Client{
-		Net:     "tcp",
-		Timeout: *timeout,
-	}, *resolver, logger)
+	exporter := NewDNSSECExporter(*timeout, *resolver, logger)
 
 	if err := toml.NewDecoder(f).Decode(exporter); err != nil {
 		log.Fatalf("couldn't parse configuration file: %v", err)

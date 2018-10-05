@@ -161,10 +161,7 @@ func TestCollectionOK(t *testing.T) {
 	addr, cancel := runServer(t, opts{})
 	defer cancel()
 
-	e := NewDNSSECExporter(&dns.Client{
-		Net:     "tcp",
-		Timeout: 1 * time.Second,
-	}, addr, nullLogger())
+	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
 	valid, exp := e.collectRecord("example.org", "@", "SOA")
 
@@ -187,10 +184,7 @@ func TestCollectionExpired(t *testing.T) {
 
 	defer cancel()
 
-	e := NewDNSSECExporter(&dns.Client{
-		Net:     "tcp",
-		Timeout: 1 * time.Second,
-	}, addr, nullLogger())
+	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
 	valid, exp := e.collectRecord("example.org", "@", "SOA")
 
@@ -217,10 +211,7 @@ func TestCollectionInvalid(t *testing.T) {
 
 	defer cancel()
 
-	e := NewDNSSECExporter(&dns.Client{
-		Net:     "tcp",
-		Timeout: 1 * time.Second,
-	}, addr, nullLogger())
+	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
 	valid, exp := e.collectRecord("example.org", "@", "SOA")
 
