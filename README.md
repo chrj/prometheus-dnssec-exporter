@@ -13,8 +13,8 @@ Check for validity and expiration in DNSSEC signatures and expose metrics for Pr
         	Configuration file (default "/etc/dnssec-checks")
       -listen-address string
         	Prometheus metrics port (default ":9204")
-      -resolver string
-        	Resolver to use (default "8.8.8.8:53")
+      -resolvers string
+        	Resolvers to use (comma separated) (default "8.8.8.8:53,1.1.1.1:53")
       -timeout duration
         	Timeout for network operations (default 10s)
 
@@ -30,12 +30,13 @@ Labels:
 * `record`
 * `type`
 
-### Gauge: `dnssec_zone_record_valid`
+### Gauge: `dnssec_zone_record_resolves`
 
-Does this record pass DNSSEC validation.
+Does the record resolve using the specified DNSSEC enabled resolvers.
 
 Labels:
 
+* `resolver`
 * `zone`
 * `record`
 * `type`
@@ -44,12 +45,14 @@ Labels:
 
     # HELP dnssec_zone_record_days_left Number of days the signature will be valid
     # TYPE dnssec_zone_record_days_left gauge
-    dnssec_zone_record_days_left{record="@",type="SOA",zone="ietf.org"} 357.5
-    dnssec_zone_record_days_left{record="@",type="SOA",zone="verisigninc.com"} 11.333333333333334
-    # HELP dnssec_zone_record_valid Does this record pass DNSSEC validation
-    # TYPE dnssec_zone_record_valid gauge
-    dnssec_zone_record_valid{record="@",type="SOA",zone="ietf.org"} 1
-    dnssec_zone_record_valid{record="@",type="SOA",zone="verisigninc.com"} 1
+    dnssec_zone_record_days_left{record="@",type="SOA",zone="ietf.org"} 320.3333333333333
+    dnssec_zone_record_days_left{record="@",type="SOA",zone="verisigninc.com"} 9.333333333333334
+    # HELP dnssec_zone_record_resolves Does the record resolve using the specified DNSSEC enabled resolvers
+    # TYPE dnssec_zone_record_resolves gauge
+    dnssec_zone_record_resolves{record="@",resolver="1.1.1.1:53",type="SOA",zone="ietf.org"} 1
+    dnssec_zone_record_resolves{record="@",resolver="1.1.1.1:53",type="SOA",zone="verisigninc.com"} 1
+    dnssec_zone_record_resolves{record="@",resolver="8.8.8.8:53",type="SOA",zone="ietf.org"} 1
+    dnssec_zone_record_resolves{record="@",resolver="8.8.8.8:53",type="SOA",zone="verisigninc.com"} 1
 
 ## Configuration
 

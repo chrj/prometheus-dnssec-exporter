@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 
 var addr = flag.String("listen-address", ":9204", "Prometheus metrics port")
 var conf = flag.String("config", "/etc/dnssec-checks", "Configuration file")
-var resolver = flag.String("resolver", "8.8.8.8:53", "Resolver to use")
+var resolvers = flag.String("resolvers", "8.8.8.8:53,1.1.1.1:53", "Resolvers to use (comma separated)")
 var timeout = flag.Duration("timeout", 10*time.Second, "Timeout for network operations")
 
 type Records struct {
@@ -34,16 +35,16 @@ type Logger interface {
 type Exporter struct {
 	Records []Records
 
-	records *prometheus.GaugeVec
-	valid   *prometheus.GaugeVec
+	records  *prometheus.GaugeVec
+	resolves *prometheus.GaugeVec
 
-	resolver  string
+	resolvers []string
 	dnsClient *dns.Client
 
 	logger Logger
 }
 
-func NewDNSSECExporter(timeout time.Duration, resolver string, logger Logger) *Exporter {
+func NewDNSSECExporter(timeout time.Duration, resolvers []string, logger Logger) *Exporter {
 	return &Exporter{
 		records: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -58,14 +59,15 @@ func NewDNSSECExporter(timeout time.Duration, resolver string, logger Logger) *E
 				"type",
 			},
 		),
-		valid: prometheus.NewGaugeVec(
+		resolves: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Namespace: "dnssec",
 				Subsystem: "zone",
-				Name:      "record_valid",
-				Help:      "Does this record pass DNSSEC validation",
+				Name:      "record_resolves",
+				Help:      "Does the record resolve using the specified DNSSEC enabled resolvers",
 			},
 			[]string{
+				"resolver",
 				"zone",
 				"record",
 				"type",
@@ -75,97 +77,88 @@ func NewDNSSECExporter(timeout time.Duration, resolver string, logger Logger) *E
 			Net:     "tcp",
 			Timeout: timeout,
 		},
-		resolver: resolver,
-		logger:   logger,
+		resolvers: resolvers,
+		logger:    logger,
 	}
 }
 
 func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	e.records.Describe(ch)
-	e.valid.Describe(ch)
+	e.resolves.Describe(ch)
 }
 
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	var wg sync.WaitGroup
 
-	wg.Add(len(e.Records))
+	wg.Add(len(e.Records) * (len(e.resolvers) + 1))
 
 	for _, rec := range e.Records {
 
 		rec := rec
 
+		// Check the expiration
+
 		go func() {
 
-			valid, exp := e.collectRecord(rec.Zone, rec.Record, rec.Type)
-
-			e.valid.WithLabelValues(
-				rec.Zone, rec.Record, rec.Type,
-			).Set(map[bool]float64{true: 1}[valid])
+			exp := e.expiration(rec.Zone, rec.Record, rec.Type)
 
 			e.records.WithLabelValues(
 				rec.Zone, rec.Record, rec.Type,
 			).Set(float64(time.Until(exp)/time.Hour) / 24)
 
 			wg.Done()
+
 		}()
+
+		// Check the configured resolvers
+
+		for _, resolver := range e.resolvers {
+
+			resolver := resolver
+
+			go func() {
+
+				resolves := e.resolve(rec.Zone, rec.Record, rec.Type, resolver)
+
+				e.resolves.WithLabelValues(
+					resolver, rec.Zone, rec.Record, rec.Type,
+				).Set(map[bool]float64{true: 1}[resolves])
+
+				wg.Done()
+
+			}()
+
+		}
 
 	}
 
 	wg.Wait()
 
 	e.records.Collect(ch)
-	e.valid.Collect(ch)
+	e.resolves.Collect(ch)
 
 }
 
-func (e *Exporter) collectRecord(zone, record, recordType string) (valid bool, exp time.Time) {
-
-	// Start by finding the DNSKEY
+func (e *Exporter) expiration(zone, record, recordType string) (exp time.Time) {
 
 	msg := &dns.Msg{}
-	msg.SetQuestion(fmt.Sprintf("%s.", zone), dns.TypeDNSKEY)
-
-	response, _, err := e.dnsClient.Exchange(msg, e.resolver)
-	if err != nil {
-		e.logger.Printf("while looking up DNSKEY for %v: %v", zone, err)
-		return
-	}
-
-	// Found keys are mapped by tag -> key
-	keys := make(map[uint16]*dns.DNSKEY)
-
-	for _, rr := range response.Answer {
-		if dnskey, ok := rr.(*dns.DNSKEY); ok && dnskey.Flags&dns.ZONE != 0 {
-			keys[dnskey.KeyTag()] = dnskey
-		}
-	}
-
-	if len(keys) == 0 {
-		e.logger.Printf("didn't find DNSKEY for %v", zone)
-	}
-
-	// Now lookup the signature
-
-	msg = &dns.Msg{}
 	msg.SetQuestion(hostname(zone, record), dns.TypeRRSIG)
 
-	response, _, err = e.dnsClient.Exchange(msg, e.resolver)
+	response, _, err := e.dnsClient.Exchange(msg, e.resolvers[0])
 	if err != nil {
 		e.logger.Printf("while looking up RRSIG for %v: %v", hostname(zone, record), err)
 		return
 	}
 
 	var sig *dns.RRSIG
-	var key *dns.DNSKEY
 
 	for _, rr := range response.Answer {
+
 		if rrsig, ok := rr.(*dns.RRSIG); ok &&
-			rrsig.TypeCovered == dns.StringToType[recordType] &&
-			keys[rrsig.KeyTag] != nil {
+			rrsig.TypeCovered == dns.StringToType[recordType] {
 
 			sig = rrsig
-			key = keys[rrsig.KeyTag]
 			break
 
 		}
@@ -182,29 +175,25 @@ func (e *Exporter) collectRecord(zone, record, recordType string) (valid bool, e
 		return
 	}
 
-	// Finally, lookup the records to validate
-
-	if key == nil {
-		e.valid.WithLabelValues(zone, record, recordType).Set(0)
-		return
-	}
-
-	msg = &dns.Msg{}
-	msg.SetQuestion(hostname(zone, record), dns.StringToType[recordType])
-
-	response, _, err = e.dnsClient.Exchange(msg, e.resolver)
-	if err != nil {
-		e.logger.Printf("while looking up RRSet for %v type %v: %v", hostname(zone, record), recordType, err)
-		return
-	}
-
-	if err := sig.Verify(key, response.Answer); err == nil {
-		valid = true
-	} else {
-		e.logger.Printf("verify error for %v type %v): %v", hostname(zone, record), recordType, err)
-	}
-
 	return
+
+}
+
+func (e *Exporter) resolve(zone, record, recordType, resolver string) (resolves bool) {
+
+	msg := &dns.Msg{}
+	msg.SetQuestion(hostname(zone, record), dns.StringToType[recordType])
+	msg.SetEdns0(4096, true)
+
+	response, _, err := e.dnsClient.Exchange(msg, resolver)
+	if err != nil {
+		e.logger.Printf("while resolving for %v: %v", hostname(zone, record), err)
+		return
+	}
+
+	return response.AuthenticatedData &&
+		!response.CheckingDisabled &&
+		response.Rcode == dns.RcodeSuccess
 
 }
 
@@ -229,7 +218,9 @@ func main() {
 
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 
-	exporter := NewDNSSECExporter(*timeout, *resolver, logger)
+	r := strings.Split(*resolvers, ",")
+
+	exporter := NewDNSSECExporter(*timeout, r, logger)
 
 	if err := toml.NewDecoder(f).Decode(exporter); err != nil {
 		log.Fatalf("couldn't parse configuration file: %v", err)

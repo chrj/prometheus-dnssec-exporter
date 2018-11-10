@@ -1,10 +1,7 @@
 package main
 
 import (
-	"crypto"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"io/ioutil"
 	"log"
 	"net"
@@ -15,16 +12,17 @@ import (
 )
 
 type opts struct {
-	signed  time.Time
-	expires time.Time
-	privkey crypto.PrivateKey
+	signed          time.Time
+	expires         time.Time
+	rcode           int
+	unauthenticated bool
 }
 
 func nullLogger() *log.Logger {
 	return log.New(ioutil.Discard, "", log.LstdFlags)
 }
 
-func runServer(t *testing.T, opts opts) (string, func()) {
+func runServer(t *testing.T, opts opts) ([]string, func()) {
 
 	if opts.signed.IsZero() {
 		opts.signed = time.Now().Add(-time.Hour)
@@ -43,10 +41,6 @@ func runServer(t *testing.T, opts opts) (string, func()) {
 	privkey, err := dnskey.Generate(256)
 	if err != nil {
 		t.Fatalf("couldn't generate private key: %v", err)
-	}
-
-	if opts.privkey != nil {
-		privkey = opts.privkey
 	}
 
 	h := dns.NewServeMux()
@@ -71,25 +65,6 @@ func runServer(t *testing.T, opts opts) (string, func()) {
 		}
 
 		switch q.Qtype {
-
-		case dns.TypeDNSKEY:
-
-			rrHeader := dns.RR_Header{
-				Name:   q.Name,
-				Rrtype: dns.TypeDNSKEY,
-				Class:  dns.ClassINET,
-				Ttl:    3600,
-			}
-
-			answer := &dns.DNSKEY{
-				Hdr:       rrHeader,
-				Algorithm: dnskey.Algorithm,
-				Flags:     dnskey.Flags,
-				Protocol:  dnskey.Protocol,
-				PublicKey: dnskey.PublicKey,
-			}
-
-			msg.Answer = append(msg.Answer, answer)
 
 		case dns.TypeRRSIG:
 
@@ -124,6 +99,9 @@ func runServer(t *testing.T, opts opts) (string, func()) {
 
 		}
 
+		msg.AuthenticatedData = !opts.unauthenticated
+		msg.Rcode = opts.rcode
+
 		rw.WriteMsg(msg)
 
 	})
@@ -150,24 +128,20 @@ func runServer(t *testing.T, opts opts) (string, func()) {
 		ln.Close()
 	}()
 
-	return ln.Addr().String(), func() {
+	return []string{ln.Addr().String()}, func() {
 		done <- true
 	}
 
 }
 
-func TestCollectionOK(t *testing.T) {
+func TestExpirationOK(t *testing.T) {
 
 	addr, cancel := runServer(t, opts{})
 	defer cancel()
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	valid, exp := e.collectRecord("example.org", "@", "SOA")
-
-	if !valid {
-		t.Fatal("expected record to be valid")
-	}
+	exp := e.expiration("example.org", "@", "SOA")
 
 	if exp.Before(time.Now()) {
 		t.Fatalf("expected expiration to be in the future, was: %v", exp)
@@ -175,7 +149,7 @@ func TestCollectionOK(t *testing.T) {
 
 }
 
-func TestCollectionExpired(t *testing.T) {
+func TestExpired(t *testing.T) {
 
 	addr, cancel := runServer(t, opts{
 		signed:  time.Now().Add(14 * 24 * time.Hour),
@@ -186,11 +160,7 @@ func TestCollectionExpired(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	valid, exp := e.collectRecord("example.org", "@", "SOA")
-
-	if !valid {
-		t.Fatal("expected record to be valid")
-	}
+	exp := e.expiration("example.org", "@", "SOA")
 
 	if exp.After(time.Now()) {
 		t.Fatalf("expected expiration to be in the past, was: %v", exp)
@@ -198,29 +168,57 @@ func TestCollectionExpired(t *testing.T) {
 
 }
 
-func TestCollectionInvalid(t *testing.T) {
-
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("couldn't generate fake private key: %v", err)
-	}
+func TestValid(t *testing.T) {
 
 	addr, cancel := runServer(t, opts{
-		privkey: priv,
+		signed:  time.Now().Add(14 * 24 * time.Hour),
+		expires: time.Now().Add(-time.Hour),
 	})
 
 	defer cancel()
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	valid, exp := e.collectRecord("example.org", "@", "SOA")
+	valid := e.resolve("example.org", "@", "SOA", addr[0])
 
-	if valid {
-		t.Fatal("expected record to be invalid")
+	if !valid {
+		t.Fatal("expected valid result")
 	}
 
-	if exp.Before(time.Now()) {
-		t.Fatalf("expected expiration to be in the future, was: %v", exp)
+}
+
+func TestInvalidError(t *testing.T) {
+
+	addr, cancel := runServer(t, opts{
+		rcode: dns.RcodeServerFailure,
+	})
+
+	defer cancel()
+
+	e := NewDNSSECExporter(time.Second, addr, nullLogger())
+
+	valid := e.resolve("example.org", "@", "SOA", addr[0])
+
+	if valid {
+		t.Fatal("expected invalid result")
+	}
+
+}
+
+func TestInvalidUnauthenticated(t *testing.T) {
+
+	addr, cancel := runServer(t, opts{
+		unauthenticated: true,
+	})
+
+	defer cancel()
+
+	e := NewDNSSECExporter(time.Second, addr, nullLogger())
+
+	valid := e.resolve("example.org", "@", "SOA", addr[0])
+
+	if valid {
+		t.Fatal("expected invalid result")
 	}
 
 }
