@@ -1,6 +1,4 @@
-ARG ARCH="amd64"
-ARG OS="linux"
-FROM quay.io/prometheus/busybox-${OS}-${ARCH}:glibc
+FROM scratch
 LABEL maintainer="Harald Koch <harald.koch@gmail.com>"
 
 COPY prometheus-dnssec-exporter /bin/prometheus-dnssec-exporter

@@ -23,7 +23,7 @@ jobs:
           go get -u golang.org/x/lint/golint
 
       - name: Run build
-        run: go build .
+        run: go build -ldflags="-w -s" .
 
       - name: Run vet & lint
         run: |
