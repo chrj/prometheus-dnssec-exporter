@@ -50,7 +50,6 @@ jobs:
       uses: actions/download-artifact@v2
       with:
         name: prometheus-dnssec-exporter
-        path: prometheus-dnssec-exporter
 
     - name: executable
       run: chmod +x prometheus-dnssec-exporter
