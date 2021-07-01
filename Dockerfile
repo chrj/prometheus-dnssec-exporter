@@ -5,5 +5,4 @@ COPY prometheus-dnssec-exporter /bin/prometheus-dnssec-exporter
 COPY config.sample /etc/dnssec-checks
 
 EXPOSE      9204
-USER        nobody
 ENTRYPOINT  [ "/bin/prometheus-dnssec-exporter" ]
