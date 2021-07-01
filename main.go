@@ -229,7 +229,10 @@ func main() {
 	prometheus.MustRegister(exporter)
 
 	http.Handle("/metrics", promhttp.Handler())
-
+        http.HandleFunc("/-/healthy", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Healthy"))
+	})
 	log.Fatal(http.ListenAndServe(*addr, nil))
 
 }
