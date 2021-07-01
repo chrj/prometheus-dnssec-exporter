@@ -28,6 +28,8 @@ jobs:
           go version
           go get -u golang.org/x/lint/golint
 
+      # these ldflags settings effectively strip the binary making it smaller.
+      # in some instances 'export CGO_ENABLED=0' is also required to build a static binary.
       - name: Run build
         run: go build -ldflags="-w -s" .
 
@@ -39,6 +41,8 @@ jobs:
       - name: test
         run: go test -v
 
+      # each job runs in a separate environment. upload our built artifact so that
+      # it can be made available in the deploy job.
       - name: upload artifact
         uses: actions/upload-artifact@v2
         with:
@@ -51,6 +55,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
+    # https://github.com/docker/build-push-action/blob/master/docs/advanced/tags-labels.md
     - name: Docker meta
       id: meta
       uses: docker/metadata-action@v3
