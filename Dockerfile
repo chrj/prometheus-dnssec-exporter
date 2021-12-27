@@ -13,7 +13,8 @@ WORKDIR /workspace
 
 COPY . .
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# not sure what this is for really
+# SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN \
   export GOOS \
