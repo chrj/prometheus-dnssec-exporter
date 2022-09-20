@@ -30,6 +30,27 @@ Labels:
 * `record`
 * `type`
 
+If more than one resolver is configured, the metric will be calculated from the
+resolver that is configured first.  If more than one RRSIG covers the record,
+the number of days until the first one expires will be returned.  If the record
+is not signed of the signature cannot be validated, this metric will contain a
+bogus timestamp.
+
+### Gauge: `dnssec_zone_record_earliest_rrsig_expiry`
+
+Earliest expiring RRSIG covering the record on resolver in unixtime.
+
+Labels:
+
+* `resolver`
+* `zone`
+* `record`
+* `type`
+
+If more than one RRSIG covers the record, the expiration time returned will be
+of the one that expires earliest.  If the record does not resolve or cannot be
+validated, this metric will be absent.
+
 ### Gauge: `dnssec_zone_record_resolves`
 
 Does the record resolve using the specified DNSSEC enabled resolvers.
@@ -40,6 +61,8 @@ Labels:
 * `zone`
 * `record`
 * `type`
+
+This metric will return 1 only if the record resolves **and** validates.
 
 ### Examples
 
@@ -53,6 +76,12 @@ Labels:
     dnssec_zone_record_resolves{record="@",resolver="1.1.1.1:53",type="SOA",zone="verisigninc.com"} 1
     dnssec_zone_record_resolves{record="@",resolver="8.8.8.8:53",type="SOA",zone="ietf.org"} 1
     dnssec_zone_record_resolves{record="@",resolver="8.8.8.8:53",type="SOA",zone="verisigninc.com"} 1
+    # HELP dnssec_zone_record_earliest_rrsig_expiry Earliest expiring RRSIG covering the record on resolver in unixtime
+    # TYPE dnssec_zone_record_earliest_rrsig_expiry gauge
+    dnssec_zone_record_earliest_rrsig_expiry{record="@",resolver="1.1.1.1:53",type="SOA",zone="ietf.org"} 1.664872679e+09
+    dnssec_zone_record_earliest_rrsig_expiry{record="@",resolver="1.1.1.1:53",type="SOA",zone="verisigninc.com"} 1.664778306e+09
+    dnssec_zone_record_earliest_rrsig_expiry{record="@",resolver="8.8.8.8:53",type="SOA",zone="ietf.org"} 1.664872679e+09
+    dnssec_zone_record_earliest_rrsig_expiry{record="@",resolver="8.8.8.8:53",type="SOA",zone="verisigninc.com"} 1.664778306e+09
 
 ## Configuration
 
