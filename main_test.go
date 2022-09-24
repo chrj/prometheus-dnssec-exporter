@@ -16,6 +16,7 @@ type opts struct {
 	expires         time.Time
 	rcode           int
 	unauthenticated bool
+	noedns0support  bool
 }
 
 func nullLogger() *log.Logger {
@@ -66,7 +67,7 @@ func runServer(t *testing.T, opts opts) ([]string, func()) {
 
 		switch q.Qtype {
 
-		case dns.TypeRRSIG:
+		case dns.TypeSOA:
 
 			rrHeader := dns.RR_Header{
 				Name:   q.Name,
@@ -74,8 +75,13 @@ func runServer(t *testing.T, opts opts) ([]string, func()) {
 				Class:  dns.ClassINET,
 				Ttl:    3600,
 			}
+			msg.Answer = append(msg.Answer, soa)
 
-			answer := &dns.RRSIG{
+			if opts.noedns0support {
+				break
+			}
+
+			rrsig := &dns.RRSIG{
 				Hdr:         rrHeader,
 				TypeCovered: dns.TypeSOA,
 				Algorithm:   dnskey.Algorithm,
@@ -87,19 +93,15 @@ func runServer(t *testing.T, opts opts) ([]string, func()) {
 				SignerName:  q.Name,
 			}
 
-			if err := answer.Sign(privkey.(*ecdsa.PrivateKey), []dns.RR{soa}); err != nil {
+			if err := rrsig.Sign(privkey.(*ecdsa.PrivateKey), []dns.RR{soa}); err != nil {
 				t.Fatalf("couldn't sign SOA record: %v", err)
 			}
 
-			msg.Answer = append(msg.Answer, answer)
-
-		case dns.TypeSOA:
-
-			msg.Answer = append(msg.Answer, soa)
+			msg.Answer = append(msg.Answer, rrsig)
 
 		}
 
-		msg.AuthenticatedData = !opts.unauthenticated
+		msg.AuthenticatedData = !opts.unauthenticated && !opts.noedns0support
 		msg.Rcode = opts.rcode
 
 		rw.WriteMsg(msg)
@@ -141,7 +143,7 @@ func TestExpirationOK(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	exp := e.expiration("example.org", "@", "SOA")
+	_, exp := e.resolve("example.org", "@", "SOA", addr[0])
 
 	if exp.Before(time.Now()) {
 		t.Fatalf("expected expiration to be in the future, was: %v", exp)
@@ -160,7 +162,7 @@ func TestExpired(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	exp := e.expiration("example.org", "@", "SOA")
+	_, exp := e.resolve("example.org", "@", "SOA", addr[0])
 
 	if exp.After(time.Now()) {
 		t.Fatalf("expected expiration to be in the past, was: %v", exp)
@@ -179,7 +181,7 @@ func TestValid(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	valid := e.resolve("example.org", "@", "SOA", addr[0])
+	valid, _ := e.resolve("example.org", "@", "SOA", addr[0])
 
 	if !valid {
 		t.Fatal("expected valid result")
@@ -197,7 +199,7 @@ func TestInvalidError(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	valid := e.resolve("example.org", "@", "SOA", addr[0])
+	valid, _ := e.resolve("example.org", "@", "SOA", addr[0])
 
 	if valid {
 		t.Fatal("expected invalid result")
@@ -215,7 +217,25 @@ func TestInvalidUnauthenticated(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	valid := e.resolve("example.org", "@", "SOA", addr[0])
+	valid, _ := e.resolve("example.org", "@", "SOA", addr[0])
+
+	if valid {
+		t.Fatal("expected invalid result")
+	}
+
+}
+
+func TestNoEDNS0Support(t *testing.T) {
+
+	addr, cancel := runServer(t, opts{
+		noedns0support: true,
+	})
+
+	defer cancel()
+
+	e := NewDNSSECExporter(time.Second, addr, nullLogger())
+
+	valid, _ := e.resolve("example.org", "@", "SOA", addr[0])
 
 	if valid {
 		t.Fatal("expected invalid result")

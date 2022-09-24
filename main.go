@@ -37,6 +37,7 @@ type Exporter struct {
 
 	records  *prometheus.GaugeVec
 	resolves *prometheus.GaugeVec
+	expiry   *prometheus.GaugeVec
 
 	resolvers []string
 	dnsClient *dns.Client
@@ -73,6 +74,20 @@ func NewDNSSECExporter(timeout time.Duration, resolvers []string, logger Logger)
 				"type",
 			},
 		),
+		expiry: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: "dnssec",
+				Subsystem: "zone",
+				Name:      "record_earliest_rrsig_expiry",
+				Help:      "Earliest expiring RRSIG covering the record on resolver in unixtime",
+			},
+			[]string{
+				"resolver",
+				"zone",
+				"record",
+				"type",
+			},
+		),
 		dnsClient: &dns.Client{
 			Net:     "tcp",
 			Timeout: timeout,
@@ -85,31 +100,18 @@ func NewDNSSECExporter(timeout time.Duration, resolvers []string, logger Logger)
 func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	e.records.Describe(ch)
 	e.resolves.Describe(ch)
+	e.expiry.Describe(ch)
 }
 
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	var wg sync.WaitGroup
 
-	wg.Add(len(e.Records) * (len(e.resolvers) + 1))
+	wg.Add(len(e.Records) * (len(e.resolvers)))
 
 	for _, rec := range e.Records {
 
 		rec := rec
-
-		// Check the expiration
-
-		go func() {
-
-			exp := e.expiration(rec.Zone, rec.Record, rec.Type)
-
-			e.records.WithLabelValues(
-				rec.Zone, rec.Record, rec.Type,
-			).Set(float64(time.Until(exp)/time.Hour) / 24)
-
-			wg.Done()
-
-		}()
 
 		// Check the configured resolvers
 
@@ -119,11 +121,28 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 			go func() {
 
-				resolves := e.resolve(rec.Zone, rec.Record, rec.Type, resolver)
+				resolves, expires := e.resolve(rec.Zone, rec.Record, rec.Type, resolver)
 
 				e.resolves.WithLabelValues(
 					resolver, rec.Zone, rec.Record, rec.Type,
 				).Set(map[bool]float64{true: 1}[resolves])
+
+				// Only return the signature expiry if the record resolves.
+				if resolves {
+					e.expiry.WithLabelValues(
+						resolver, rec.Zone, rec.Record, rec.Type,
+					).Set(float64(expires.Unix()))
+				}
+
+				// For compatibility with historical behaviour, record_days_left
+				// returns the time until the earliest RRSIG expiration on the
+				// first configured resolver.  This value will be bogus if that
+				// resolver fails to resolve and validate the record.
+				if (resolver == e.resolvers[0]) {
+					e.records.WithLabelValues(
+						rec.Zone, rec.Record, rec.Type,
+					).Set(float64(time.Until(expires)/time.Hour) / 24)
+				}
 
 				wg.Done()
 
@@ -137,49 +156,11 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	e.records.Collect(ch)
 	e.resolves.Collect(ch)
+	e.expiry.Collect(ch)
 
 }
 
-func (e *Exporter) expiration(zone, record, recordType string) (exp time.Time) {
-
-	msg := &dns.Msg{}
-	msg.SetQuestion(hostname(zone, record), dns.TypeRRSIG)
-
-	response, _, err := e.dnsClient.Exchange(msg, e.resolvers[0])
-	if err != nil {
-		e.logger.Printf("while looking up RRSIG for %v: %v", hostname(zone, record), err)
-		return
-	}
-
-	var sig *dns.RRSIG
-
-	for _, rr := range response.Answer {
-
-		if rrsig, ok := rr.(*dns.RRSIG); ok &&
-			rrsig.TypeCovered == dns.StringToType[recordType] {
-
-			sig = rrsig
-			break
-
-		}
-	}
-
-	if sig == nil {
-		e.logger.Printf("didn't find RRSIG for %v covering type %v matching a tag of a DNSKEY", hostname(zone, record), recordType)
-		return
-	}
-
-	exp = time.Unix(int64(sig.Expiration), 0)
-	if exp.IsZero() {
-		e.logger.Printf("zero exp for RRSIG for %v covering type %v", hostname(zone, record), recordType)
-		return
-	}
-
-	return
-
-}
-
-func (e *Exporter) resolve(zone, record, recordType, resolver string) (resolves bool) {
+func (e *Exporter) resolve(zone, record, recordType, resolver string) (resolves bool, expires time.Time) {
 
 	msg := &dns.Msg{}
 	msg.SetQuestion(hostname(zone, record), dns.StringToType[recordType])
@@ -187,14 +168,25 @@ func (e *Exporter) resolve(zone, record, recordType, resolver string) (resolves 
 
 	response, _, err := e.dnsClient.Exchange(msg, resolver)
 	if err != nil {
-		e.logger.Printf("while resolving for %v: %v", hostname(zone, record), err)
+		e.logger.Printf("error resolving %v %v on %v: %v", hostname(zone, record), recordType, resolver, err)
 		return
 	}
 
-	return response.AuthenticatedData &&
+	resolves = response.AuthenticatedData &&
 		!response.CheckingDisabled &&
 		response.Rcode == dns.RcodeSuccess
 
+	// If multiple RRSIGs cover our record, return the one that will expire the earliest.
+	for _, rr := range response.Answer {
+		if rrsig, ok := rr.(*dns.RRSIG); ok {
+			sigexp := time.Unix(int64(rrsig.Expiration), 0)
+			if (expires.IsZero() || sigexp.Before(expires) && !sigexp.IsZero()) {
+				expires = sigexp;
+			}
+		}
+	}
+
+	return
 }
 
 func hostname(zone, record string) string {
