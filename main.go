@@ -27,6 +27,10 @@ type Records struct {
 	Type   string
 }
 
+type Zones struct {
+	Zone string
+}
+
 type Logger interface {
 	Print(v ...interface{})
 	Printf(format string, v ...interface{})
@@ -34,6 +38,7 @@ type Logger interface {
 
 type Exporter struct {
 	Records []Records
+	Zones []Zones
 
 	records  *prometheus.GaugeVec
 	resolves *prometheus.GaugeVec
@@ -234,6 +239,15 @@ func main() {
 
 	if err := toml.NewDecoder(f).Decode(exporter); err != nil {
 		log.Fatalf("couldn't parse configuration file: %v", err)
+	}
+
+	for _, zone := range exporter.Zones {
+		var rec Records
+		rec.Zone = zone.Zone
+		rec.Record = "@"
+		rec.Type = "AXFR"
+
+		exporter.Records = append(exporter.Records, rec)
 	}
 
 	prometheus.MustRegister(exporter)

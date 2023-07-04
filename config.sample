@@ -7,3 +7,6 @@
   zone = "verisigninc.com"
   record = "@"
   type = "SOA"
+
+#[[zones]]
+#  zone = "example.com"
