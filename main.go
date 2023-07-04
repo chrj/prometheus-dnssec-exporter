@@ -121,7 +121,14 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 			go func() {
 
-				resolves, expires := e.resolve(rec.Zone, rec.Record, rec.Type, resolver)
+				resolves, expires := e.resolve(&rec, resolver)
+
+				// AXFR is not a record type.  Don't create bogus
+				// metrics for failed zone transfers.
+				if (rec.Type == "AXFR") {
+					wg.Done()
+					return
+				}
 
 				e.resolves.WithLabelValues(
 					resolver, rec.Zone, rec.Record, rec.Type,
@@ -160,27 +167,38 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 }
 
-func (e *Exporter) resolve(zone, record, recordType, resolver string) (resolves bool, expires time.Time) {
+func (e *Exporter) resolve(record *Records, resolver string) (resolves bool, expires time.Time) {
 
 	msg := &dns.Msg{}
-	msg.SetQuestion(hostname(zone, record), dns.StringToType[recordType])
+	msg.SetQuestion(hostname(record), dns.StringToType[record.Type])
 	msg.SetEdns0(4096, true)
 
 	response, _, err := e.dnsClient.Exchange(msg, resolver)
 	if err != nil {
-		e.logger.Printf("error resolving %v %v on %v: %v", hostname(zone, record), recordType, resolver, err)
+		e.logger.Printf("error resolving %v %v on %v: %v",
+			hostname(record), record.Type, resolver, err)
 		return
 	}
 
-	resolves = response.AuthenticatedData &&
-		!response.CheckingDisabled &&
-		response.Rcode == dns.RcodeSuccess
+	// AXFR queries can fail in interesting ways.
+	if record.Type == "AXFR" && response.Rcode != dns.RcodeSuccess {
+		e.logger.Printf("afxr for %v failed on %v: %v",
+			hostname(record), resolver, dns.RcodeToString[response.Rcode])
+		return
+	}
 
-	// If multiple RRSIGs cover our record, return the one that will expire the earliest.
+	// Validating recursive resolvers set the AD bit,
+	// authoritative resolvers set the AA bit.
+	resolves = response.Rcode == dns.RcodeSuccess &&
+		response.AuthenticatedData || response.Authoritative
+
+	// If multiple RRSIGs are found, report the one that will expire the earliest.
 	for _, rr := range response.Answer {
 		if rrsig, ok := rr.(*dns.RRSIG); ok {
 			sigexp := time.Unix(int64(rrsig.Expiration), 0)
 			if (expires.IsZero() || sigexp.Before(expires) && !sigexp.IsZero()) {
+				record.Record = rrsig.Hdr.Name
+				record.Type = dns.TypeToString[rrsig.TypeCovered]
 				expires = sigexp;
 			}
 		}
@@ -189,13 +207,13 @@ func (e *Exporter) resolve(zone, record, recordType, resolver string) (resolves 
 	return
 }
 
-func hostname(zone, record string) string {
+func hostname(record *Records) string {
 
-	if record == "@" {
-		return fmt.Sprintf("%s.", zone)
+	if record.Record == "@" {
+		return fmt.Sprintf("%s.", record.Zone)
 	}
 
-	return fmt.Sprintf("%s.%s.", record, zone)
+	return fmt.Sprintf("%s.%s.", record.Record, record.Zone)
 
 }
 
