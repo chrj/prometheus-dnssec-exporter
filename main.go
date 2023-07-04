@@ -21,6 +21,12 @@ var conf = flag.String("config", "/etc/dnssec-checks", "Configuration file")
 var resolvers = flag.String("resolvers", "8.8.8.8:53,1.1.1.1:53", "Resolvers to use (comma separated)")
 var timeout = flag.Duration("timeout", 10*time.Second, "Timeout for network operations")
 
+type Keys struct {
+	Algorithm string
+	Name      string
+	Secret    string
+}
+
 type Records struct {
 	Zone   string
 	Record string
@@ -29,6 +35,7 @@ type Records struct {
 
 type Zones struct {
 	Zone string
+	Key string
 }
 
 type Logger interface {
@@ -37,8 +44,11 @@ type Logger interface {
 }
 
 type Exporter struct {
+	Keys []Keys
 	Records []Records
 	Zones []Zones
+
+	TsigInfo map[Records]*Keys
 
 	records  *prometheus.GaugeVec
 	resolves *prometheus.GaugeVec
@@ -178,6 +188,11 @@ func (e *Exporter) resolve(record *Records, resolver string) (resolves bool, exp
 	msg.SetQuestion(hostname(record), dns.StringToType[record.Type])
 	msg.SetEdns0(4096, true)
 
+	tsig := e.TsigInfo[*record]
+	if tsig != nil {
+		msg.SetTsig(tsig.Name, tsig.Algorithm, 300, time.Now().Unix())
+	}
+
 	response, _, err := e.dnsClient.Exchange(msg, resolver)
 	if err != nil {
 		e.logger.Printf("error resolving %v %v on %v: %v",
@@ -241,12 +256,31 @@ func main() {
 		log.Fatalf("couldn't parse configuration file: %v", err)
 	}
 
+	keys := make(map[string]*Keys)
+
+	if (len(exporter.Keys) > 0) {
+		secrets := make(map[string]string)
+		for _, key := range exporter.Keys {
+			keys[key.Name] = &key
+			secrets[key.Name] = key.Secret
+		}
+		exporter.dnsClient.TsigSecret = secrets
+	}
+
+	exporter.TsigInfo = make(map[Records]*Keys)
+
 	for _, zone := range exporter.Zones {
 		var rec Records
 		rec.Zone = zone.Zone
 		rec.Record = "@"
 		rec.Type = "AXFR"
 
+		if (zone.Key != "" && keys[zone.Key] == nil) {
+			log.Fatalf("Unknown key %v configured for zone %v",
+				zone.Key, zone.Zone);
+		}
+
+		exporter.TsigInfo[rec] = keys[zone.Key]
 		exporter.Records = append(exporter.Records, rec)
 	}
 

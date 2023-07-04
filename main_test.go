@@ -174,6 +174,7 @@ func runServer(t *testing.T, opts opts) ([]string, func()) {
 	}
 
 	server := &dns.Server{
+		TsigSecret: map[string]string{"axfr.": "so6ZGir4GPAqINNh9U5c3A=="},
 		Listener: ln,
 		Handler:  h,
 	}
@@ -416,6 +417,48 @@ func TestAxfrRefused(t *testing.T) {
 
 	if valid {
 		t.Fatalf("Expected invalid result")
+	}
+
+}
+
+func TestAxfrTSIG(t *testing.T) {
+
+	addr, cancel := runServer(t, opts{})
+	record := Records{"example.org", "@", "AXFR"}
+	key := Keys{"hmac-sha256.", "axfr.", "so6ZGir4GPAqINNh9U5c3A=="}
+
+	defer cancel()
+
+	e := NewDNSSECExporter(time.Second, addr, nullLogger())
+
+	e.dnsClient.TsigSecret = map[string]string{key.Name: key.Secret}
+	e.TsigInfo = map[Records]*Keys{record: &key}
+
+	valid, _ := e.resolve(&record, addr[0])
+
+	if !valid {
+		t.Fatal("expected valid result")
+	}
+
+}
+
+func TestAxfrTSIGWrong(t *testing.T) {
+
+	addr, cancel := runServer(t, opts{})
+	record := Records{"example.org", "@", "AXFR"}
+	key := Keys{"hmac-sha256.", "axfr.", "YmFkYmFkYmFkYmFkCg=="}
+
+	defer cancel()
+
+	e := NewDNSSECExporter(time.Second, addr, nullLogger())
+
+	e.dnsClient.TsigSecret = map[string]string{key.Name: key.Secret}
+	e.TsigInfo = map[Records]*Keys{record: &key}
+
+	valid, _ := e.resolve(&record, addr[0])
+
+	if valid {
+		t.Fatal("expected invalid result")
 	}
 
 }

@@ -97,7 +97,9 @@ Supply a configuration file path with `-config` (optionally, defaults to `/etc/d
 
 ### Support for authoritative servers (AXFR)
 
-If `[[zones]]` are configured, the resolvers specified with `-resolvers` must be configured to accept zone transfers (AXFR queries) from the machine running prometheus-dnssec-exporter.  Recursive resolvers do not support zone transfers.
+If `[[zones]]` are configured, the resolvers specified with `-resolvers` must be configured to accept zone transfers (AXFR queries), optionally secured with a TSIG key, from the machine running prometheus-dnssec-exporter.  Recursive resolvers do not support zone transfers.
+
+If a TSIG `key` is configured for a zone, a matching `[[keys]]` configuration must exist.
 
 It is considered impolite to send AXFR queries to public resolvers (e.g. Cloudflare, Google, Quad9).
 
