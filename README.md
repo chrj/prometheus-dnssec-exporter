@@ -36,6 +36,9 @@ the number of days until the first one expires will be returned.  If the record
 is not signed of the signature cannot be validated, this metric will contain a
 bogus timestamp.
 
+If a zone is monitored, this metric will be calculated for the earliest record
+to expire in the zone.
+
 ### Gauge: `dnssec_zone_record_earliest_rrsig_expiry`
 
 Earliest expiring RRSIG covering the record on resolver in unixtime.
@@ -50,6 +53,9 @@ Labels:
 If more than one RRSIG covers the record, the expiration time returned will be
 of the one that expires earliest.  If the record does not resolve or cannot be
 validated, this metric will be absent.
+
+If a zone is monitored, this metric will be calculated for the earliest record
+to expire in the zone.
 
 ### Gauge: `dnssec_zone_record_resolves`
 
@@ -88,6 +94,16 @@ This metric will return 1 only if the record resolves **and** validates.
 Supply a configuration file path with `-config` (optionally, defaults to `/etc/dnssec-checks`). Uses [TOML](https://github.com/toml-lang/toml).
 
 [Sample configuration file](config.sample)
+
+### Support for authoritative servers (AXFR)
+
+If `[[zones]]` are configured, the resolvers specified with `-resolvers` must be configured to accept zone transfers (AXFR queries), optionally secured with a TSIG key, from the machine running prometheus-dnssec-exporter.  Recursive resolvers do not support zone transfers.
+
+If a TSIG `key` is configured for a zone, a matching `[[keys]]` configuration must exist.
+
+It is considered impolite to send AXFR queries to public resolvers (e.g. Cloudflare, Google, Quad9).
+
+Run separate instances of prometheus-dnssec-exporter to monitor zones on authoritative servers as well as records on public resolvers.
 
 ## Prometheus target
 

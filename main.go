@@ -21,10 +21,21 @@ var conf = flag.String("config", "/etc/dnssec-checks", "Configuration file")
 var resolvers = flag.String("resolvers", "8.8.8.8:53,1.1.1.1:53", "Resolvers to use (comma separated)")
 var timeout = flag.Duration("timeout", 10*time.Second, "Timeout for network operations")
 
+type Keys struct {
+	Algorithm string
+	Name      string
+	Secret    string
+}
+
 type Records struct {
 	Zone   string
 	Record string
 	Type   string
+}
+
+type Zones struct {
+	Zone string
+	Key string
 }
 
 type Logger interface {
@@ -33,7 +44,11 @@ type Logger interface {
 }
 
 type Exporter struct {
+	Keys []Keys
 	Records []Records
+	Zones []Zones
+
+	TsigInfo map[Records]*Keys
 
 	records  *prometheus.GaugeVec
 	resolves *prometheus.GaugeVec
@@ -121,7 +136,14 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 			go func() {
 
-				resolves, expires := e.resolve(rec.Zone, rec.Record, rec.Type, resolver)
+				resolves, expires := e.resolve(&rec, resolver)
+
+				// AXFR is not a record type.  Don't create bogus
+				// metrics for failed zone transfers.
+				if (rec.Type == "AXFR") {
+					wg.Done()
+					return
+				}
 
 				e.resolves.WithLabelValues(
 					resolver, rec.Zone, rec.Record, rec.Type,
@@ -160,27 +182,43 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 }
 
-func (e *Exporter) resolve(zone, record, recordType, resolver string) (resolves bool, expires time.Time) {
+func (e *Exporter) resolve(record *Records, resolver string) (resolves bool, expires time.Time) {
 
 	msg := &dns.Msg{}
-	msg.SetQuestion(hostname(zone, record), dns.StringToType[recordType])
+	msg.SetQuestion(hostname(record), dns.StringToType[record.Type])
 	msg.SetEdns0(4096, true)
+
+	tsig := e.TsigInfo[*record]
+	if tsig != nil {
+		msg.SetTsig(tsig.Name, tsig.Algorithm, 300, time.Now().Unix())
+	}
 
 	response, _, err := e.dnsClient.Exchange(msg, resolver)
 	if err != nil {
-		e.logger.Printf("error resolving %v %v on %v: %v", hostname(zone, record), recordType, resolver, err)
+		e.logger.Printf("error resolving %v %v on %v: %v",
+			hostname(record), record.Type, resolver, err)
 		return
 	}
 
-	resolves = response.AuthenticatedData &&
-		!response.CheckingDisabled &&
-		response.Rcode == dns.RcodeSuccess
+	// AXFR queries can fail in interesting ways.
+	if record.Type == "AXFR" && response.Rcode != dns.RcodeSuccess {
+		e.logger.Printf("afxr for %v failed on %v: %v",
+			hostname(record), resolver, dns.RcodeToString[response.Rcode])
+		return
+	}
 
-	// If multiple RRSIGs cover our record, return the one that will expire the earliest.
+	// Validating recursive resolvers set the AD bit,
+	// authoritative resolvers set the AA bit.
+	resolves = response.Rcode == dns.RcodeSuccess &&
+		response.AuthenticatedData || response.Authoritative
+
+	// If multiple RRSIGs are found, report the one that will expire the earliest.
 	for _, rr := range response.Answer {
 		if rrsig, ok := rr.(*dns.RRSIG); ok {
 			sigexp := time.Unix(int64(rrsig.Expiration), 0)
 			if (expires.IsZero() || sigexp.Before(expires) && !sigexp.IsZero()) {
+				record.Record = rrsig.Hdr.Name
+				record.Type = dns.TypeToString[rrsig.TypeCovered]
 				expires = sigexp;
 			}
 		}
@@ -189,13 +227,13 @@ func (e *Exporter) resolve(zone, record, recordType, resolver string) (resolves 
 	return
 }
 
-func hostname(zone, record string) string {
+func hostname(record *Records) string {
 
-	if record == "@" {
-		return fmt.Sprintf("%s.", zone)
+	if record.Record == "@" {
+		return fmt.Sprintf("%s.", record.Zone)
 	}
 
-	return fmt.Sprintf("%s.%s.", record, zone)
+	return fmt.Sprintf("%s.%s.", record.Record, record.Zone)
 
 }
 
@@ -216,6 +254,34 @@ func main() {
 
 	if err := toml.NewDecoder(f).Decode(exporter); err != nil {
 		log.Fatalf("couldn't parse configuration file: %v", err)
+	}
+
+	keys := make(map[string]*Keys)
+
+	if (len(exporter.Keys) > 0) {
+		secrets := make(map[string]string)
+		for _, key := range exporter.Keys {
+			keys[key.Name] = &key
+			secrets[key.Name] = key.Secret
+		}
+		exporter.dnsClient.TsigSecret = secrets
+	}
+
+	exporter.TsigInfo = make(map[Records]*Keys)
+
+	for _, zone := range exporter.Zones {
+		var rec Records
+		rec.Zone = zone.Zone
+		rec.Record = "@"
+		rec.Type = "AXFR"
+
+		if (zone.Key != "" && keys[zone.Key] == nil) {
+			log.Fatalf("Unknown key %v configured for zone %v",
+				zone.Key, zone.Zone);
+		}
+
+		exporter.TsigInfo[rec] = keys[zone.Key]
+		exporter.Records = append(exporter.Records, rec)
 	}
 
 	prometheus.MustRegister(exporter)

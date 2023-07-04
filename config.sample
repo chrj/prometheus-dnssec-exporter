@@ -7,3 +7,13 @@
   zone = "verisigninc.com"
   record = "@"
   type = "SOA"
+
+#[[keys]]
+#  name = "mysecretkey."
+#  algorithm = "hmac-sha256."
+#  # From e.g. tsig-keygen(1)
+#  secret = "mvgDxfYTSe8L+pp7h4r+PIeTc67YTPhGWZrhmIi2Rpo="
+
+#[[zones]]
+#  zone = "example.com"
+#  key = "mysecretkey."
