@@ -104,7 +104,9 @@ func runServer(t *testing.T, opts opts) ([]string, func()) {
 		msg.AuthenticatedData = !opts.unauthenticated && !opts.noedns0support
 		msg.Rcode = opts.rcode
 
-		rw.WriteMsg(msg)
+		if err := rw.WriteMsg(msg); err != nil {
+			t.Fatalf("couldn't write message: %v", err)
+		}
 
 	})
 
@@ -119,15 +121,15 @@ func runServer(t *testing.T, opts opts) ([]string, func()) {
 	}
 
 	go func() {
-		server.ActivateAndServe()
+		_ = server.ActivateAndServe()
 	}()
 
 	done := make(chan bool)
 
 	go func() {
 		<-done
-		server.Shutdown()
-		ln.Close()
+		_ = server.Shutdown()
+		_ = ln.Close()
 	}()
 
 	return []string{ln.Addr().String()}, func() {
