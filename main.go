@@ -138,7 +138,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 				// returns the time until the earliest RRSIG expiration on the
 				// first configured resolver.  This value will be bogus if that
 				// resolver fails to resolve and validate the record.
-				if (resolver == e.resolvers[0]) {
+				if resolver == e.resolvers[0] {
 					e.records.WithLabelValues(
 						rec.Zone, rec.Record, rec.Type,
 					).Set(float64(time.Until(expires)/time.Hour) / 24)
@@ -180,8 +180,8 @@ func (e *Exporter) resolve(zone, record, recordType, resolver string) (resolves 
 	for _, rr := range response.Answer {
 		if rrsig, ok := rr.(*dns.RRSIG); ok {
 			sigexp := time.Unix(int64(rrsig.Expiration), 0)
-			if (expires.IsZero() || sigexp.Before(expires) && !sigexp.IsZero()) {
-				expires = sigexp;
+			if expires.IsZero() || sigexp.Before(expires) && !sigexp.IsZero() {
+				expires = sigexp
 			}
 		}
 	}
