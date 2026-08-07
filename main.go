@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/miekg/dns"
-	"github.com/naoina/toml"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -258,6 +258,11 @@ func parseResolvers(list string) ([]string, error) {
 	return resolvers, nil
 }
 
+// config is the schema of the configuration file.
+type config struct {
+	Records []Record
+}
+
 // loadExporter reads the configuration file and returns a validated exporter.
 func loadExporter(path string, timeout time.Duration, resolvers []string, logger *slog.Logger) (*Exporter, error) {
 	f, err := os.Open(path)
@@ -267,11 +272,26 @@ func loadExporter(path string, timeout time.Duration, resolvers []string, logger
 	// The file is only read, so a failure to close it cannot lose data.
 	defer func() { _ = f.Close() }()
 
-	exporter := NewDNSSECExporter(timeout, resolvers, logger)
+	var cfg config
 
-	if err := toml.NewDecoder(f).Decode(exporter); err != nil {
+	md, err := toml.NewDecoder(f).Decode(&cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parse configuration file %s: %w", path, err)
 	}
+
+	// A misspelled key must stop the exporter. Left unreported, it reads as a
+	// setting that was accepted, while the record is silently not checked.
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		keys := make([]string, 0, len(undecoded))
+		for _, key := range undecoded {
+			keys = append(keys, key.String())
+		}
+
+		return nil, fmt.Errorf("configuration file %s has unknown keys: %s", path, strings.Join(keys, ", "))
+	}
+
+	exporter := NewDNSSECExporter(timeout, resolvers, logger)
+	exporter.Records = cfg.Records
 
 	if err := exporter.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration file %s: %w", path, err)
