@@ -20,6 +20,14 @@ groups:
     annotations:
       description: The DNSSEC signature for the {{$labels.record}} in {{$labels.zone}} type {{$labels.type}}) on resolver {{$labels.resolver}} is invalid
       title: The DNSSEC signature for the {{$labels.record}} in {{$labels.zone}}  on resolver {{$labels.resolver}} is invalid
+  - alert: DNSSECZoneTransferFailed
+    expr: dnssec_zone_transfer_success == 0
+    for: 15m
+    labels:
+      urgency: immediate
+    annotations:
+      description: The exporter could not transfer the zone {{$labels.zone}} from {{$labels.server}}. The signatures in this zone are not checked while the transfer fails.
+      title: The zone transfer for {{$labels.zone}} is failing
   # A record that stops being reported entirely is not covered by the alerts
   # above, because they cannot match an absent series.
   - alert: DNSSECRecordMissing

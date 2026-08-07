@@ -69,6 +69,20 @@ expiration.
 If the resolver gives no answer, or the answer has no RRSIG, this metric is
 absent.
 
+### Gauge: `dnssec_zone_transfer_success`
+
+Did the zone transfer from the configured server succeed.
+
+Labels:
+
+* `server`
+* `zone`
+
+This metric is 1 only when the exporter transferred the whole zone. A refused
+transfer, a wrong TSIG key, or a server that cannot be reached makes it 0.
+
+The exporter reports this metric only for a `[[zones]]` entry.
+
 ### Gauge: `dnssec_zone_record_resolves`
 
 Does the record resolve using the specified DNSSEC enabled resolvers.
@@ -110,9 +124,46 @@ Supply a configuration file path with `-config` (optionally, defaults to `/etc/d
 
 [Sample configuration file](config.sample)
 
-The exporter rejects a key that it does not know, and names it in the error. A
-misspelled key is therefore an error at start, not a record that is silently not
-checked.
+The exporter rejects a setting that it does not know, and names it in the error.
+A misspelled setting is therefore an error at start, not a record that is
+silently not checked.
+
+### Records
+
+A `[[records]]` entry checks one record against the resolvers given with
+`-resolvers`. Use this to see what the public internet sees.
+
+### Zones
+
+A `[[zones]]` entry transfers a whole zone with AXFR and reports the record whose
+signature expires first. Use this to find one expiring record among thousands,
+which a per-record check cannot do.
+
+    [[zones]]
+      zone = "example.com"
+      server = "ns1.example.com:53"
+      key = "mysecretkey."
+
+`server` is the server to transfer from. It defaults to the first `-resolvers`
+entry. Give each zone its own server to check zones on your authoritative
+servers and records on public resolvers in the same process.
+
+`key` is optional. It names a `[[keys]]` entry that signs the transfer with TSIG.
+
+### Keys
+
+A `[[keys]]` entry holds a TSIG key. Get the secret from `tsig-keygen(1)`.
+
+    [[keys]]
+      name = "mysecretkey."
+      algorithm = "hmac-sha256."
+      secret = "mvgDxfYTSe8L+pp7h4r+PIeTc67YTPhGWZrhmIi2Rpo="
+
+`algorithm` must be one of `hmac-sha1`, `hmac-sha224`, `hmac-sha256`,
+`hmac-sha384` or `hmac-sha512`. HMAC-MD5 is not supported, because it is broken.
+
+The exporter never writes a secret to its log. The configuration file holds the
+secret in clear text, so give it the same protection as a private key.
 
 ## Prometheus target
 
