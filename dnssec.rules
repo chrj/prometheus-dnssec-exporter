@@ -1,9 +1,12 @@
 groups:
 - name: prometheus/alerts/dnssec.rules
   rules:
+  # The exporter makes a series absent when it cannot get an answer, so a short
+  # `for` window would page on a single failed scrape. Keep the window long
+  # enough to ride out a temporary resolver or network failure.
   - alert: DNSSECSignatureExpiration
     expr: dnssec_zone_record_days_left < 10
-    for: 1m
+    for: 15m
     labels:
       urgency: immediate
     annotations:
@@ -11,9 +14,19 @@ groups:
       title: The DNSSEC signature for the {{$labels.record}} in {{$labels.zone}} is expiring
   - alert: DNSSECSignatureInvalid
     expr: dnssec_zone_record_resolves == 0
-    for: 1m
+    for: 15m
     labels:
       urgency: immediate
     annotations:
       description: The DNSSEC signature for the {{$labels.record}} in {{$labels.zone}} type {{$labels.type}}) on resolver {{$labels.resolver}} is invalid
       title: The DNSSEC signature for the {{$labels.record}} in {{$labels.zone}}  on resolver {{$labels.resolver}} is invalid
+  # A record that stops being reported entirely is not covered by the alerts
+  # above, because they cannot match an absent series.
+  - alert: DNSSECRecordMissing
+    expr: absent(dnssec_zone_record_resolves)
+    for: 15m
+    labels:
+      urgency: warning
+    annotations:
+      description: The DNSSEC exporter reported no records for 15 minutes. Check that the exporter runs and that its configuration file lists the expected records.
+      title: The DNSSEC exporter is not reporting any records
