@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"io"
-	"log"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,8 +21,12 @@ type opts struct {
 	noedns0support  bool
 }
 
-func nullLogger() *log.Logger {
-	return log.New(io.Discard, "", log.LstdFlags)
+func nullLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func soaRecord() Record {
+	return Record{Zone: "example.org", Record: "@", Type: "SOA"}
 }
 
 func runServer(t *testing.T, opts opts) ([]string, func()) {
@@ -94,7 +100,8 @@ func runServer(t *testing.T, opts opts) ([]string, func()) {
 			}
 
 			if err := rrsig.Sign(privkey.(*ecdsa.PrivateKey), []dns.RR{soa}); err != nil {
-				t.Fatalf("couldn't sign SOA record: %v", err)
+				t.Errorf("couldn't sign SOA record: %v", err)
+				return
 			}
 
 			msg.Answer = append(msg.Answer, rrsig)
@@ -105,12 +112,14 @@ func runServer(t *testing.T, opts opts) ([]string, func()) {
 		msg.Rcode = opts.rcode
 
 		if err := rw.WriteMsg(msg); err != nil {
-			t.Fatalf("couldn't write message: %v", err)
+			t.Errorf("couldn't write message: %v", err)
 		}
 
 	})
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen failed: %v", err)
 	}
@@ -145,7 +154,7 @@ func TestExpirationOK(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	_, exp := e.resolve("example.org", "@", "SOA", addr[0])
+	_, exp := e.resolve(context.Background(), soaRecord(), addr[0])
 
 	if exp.Before(time.Now()) {
 		t.Fatalf("expected expiration to be in the future, was: %v", exp)
@@ -164,7 +173,7 @@ func TestExpired(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	_, exp := e.resolve("example.org", "@", "SOA", addr[0])
+	_, exp := e.resolve(context.Background(), soaRecord(), addr[0])
 
 	if exp.After(time.Now()) {
 		t.Fatalf("expected expiration to be in the past, was: %v", exp)
@@ -183,7 +192,7 @@ func TestValid(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	valid, _ := e.resolve("example.org", "@", "SOA", addr[0])
+	valid, _ := e.resolve(context.Background(), soaRecord(), addr[0])
 
 	if !valid {
 		t.Fatal("expected valid result")
@@ -201,7 +210,7 @@ func TestInvalidError(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	valid, _ := e.resolve("example.org", "@", "SOA", addr[0])
+	valid, _ := e.resolve(context.Background(), soaRecord(), addr[0])
 
 	if valid {
 		t.Fatal("expected invalid result")
@@ -219,7 +228,7 @@ func TestInvalidUnauthenticated(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	valid, _ := e.resolve("example.org", "@", "SOA", addr[0])
+	valid, _ := e.resolve(context.Background(), soaRecord(), addr[0])
 
 	if valid {
 		t.Fatal("expected invalid result")
@@ -237,10 +246,113 @@ func TestNoEDNS0Support(t *testing.T) {
 
 	e := NewDNSSECExporter(time.Second, addr, nullLogger())
 
-	valid, _ := e.resolve("example.org", "@", "SOA", addr[0])
+	valid, _ := e.resolve(context.Background(), soaRecord(), addr[0])
 
 	if valid {
 		t.Fatal("expected invalid result")
+	}
+
+}
+
+func TestHostname(t *testing.T) {
+
+	tests := []struct {
+		name   string
+		zone   string
+		record string
+		want   string
+	}{
+		{"apex", "example.org", "@", "example.org."},
+		{"subdomain", "example.org", "www", "www.example.org."},
+		{"absolute zone", "example.org.", "@", "example.org."},
+		{"absolute subdomain", "example.org.", "www", "www.example.org."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hostname(tt.zone, tt.record); got != tt.want {
+				t.Fatalf("hostname(%q, %q) = %q, want %q", tt.zone, tt.record, got, tt.want)
+			}
+		})
+	}
+
+}
+
+func TestParseResolvers(t *testing.T) {
+
+	tests := []struct {
+		name    string
+		list    string
+		want    []string
+		wantErr bool
+	}{
+		{"with ports", "8.8.8.8:53,1.1.1.1:53", []string{"8.8.8.8:53", "1.1.1.1:53"}, false},
+		{"default port", "8.8.8.8,1.1.1.1", []string{"8.8.8.8:53", "1.1.1.1:53"}, false},
+		{"ipv6 default port", "2001:4860:4860::8888", []string{"[2001:4860:4860::8888]:53"}, false},
+		{"ipv6 with port", "[2001:4860:4860::8888]:53", []string{"[2001:4860:4860::8888]:53"}, false},
+		{"hostname", "dns.example.org", []string{"dns.example.org:53"}, false},
+		{"whitespace and blanks", " 8.8.8.8 , ,1.1.1.1:5353", []string{"8.8.8.8:53", "1.1.1.1:5353"}, false},
+		{"empty", "", nil, true},
+		{"only separators", ",,", nil, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseResolvers(tt.list)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseResolvers(%q) = %v, want error", tt.list, got)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("parseResolvers(%q) returned error: %v", tt.list, err)
+			}
+
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Fatalf("parseResolvers(%q) = %v, want %v", tt.list, got, tt.want)
+			}
+		})
+	}
+
+}
+
+func TestValidate(t *testing.T) {
+
+	tests := []struct {
+		name    string
+		records []Record
+		wantErr bool
+	}{
+		{"valid", []Record{{Zone: "example.org", Record: "@", Type: "SOA"}}, false},
+		{"valid subdomain", []Record{{Zone: "example.org", Record: "www", Type: "A"}}, false},
+		{"no records", nil, true},
+		{"missing zone", []Record{{Record: "@", Type: "SOA"}}, true},
+		{"missing record", []Record{{Zone: "example.org", Type: "SOA"}}, true},
+		{"unknown type", []Record{{Zone: "example.org", Record: "@", Type: "NOPE"}}, true},
+		{"duplicate", []Record{
+			{Zone: "example.org", Record: "@", Type: "SOA"},
+			{Zone: "example.org", Record: "@", Type: "SOA"},
+		}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := NewDNSSECExporter(time.Second, []string{"127.0.0.1:53"}, nullLogger())
+			e.Records = tt.records
+
+			err := e.Validate()
+
+			if tt.wantErr && err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+
+			if !tt.wantErr && err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+		})
 	}
 
 }
