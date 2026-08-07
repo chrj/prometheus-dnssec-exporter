@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 type opts struct {
@@ -250,6 +251,36 @@ func TestNoEDNS0Support(t *testing.T) {
 
 	if valid {
 		t.Fatal("expected invalid result")
+	}
+
+}
+
+// Authoritative servers serve RRSIGs but never set the AD bit. The expiry
+// metric must still be reported so those servers can be monitored.
+func TestExpiryReportedWithoutAuthenticatedData(t *testing.T) {
+
+	addr, cancel := runServer(t, opts{
+		unauthenticated: true,
+		expires:         time.Unix(2000000000, 0),
+	})
+
+	defer cancel()
+
+	e := NewDNSSECExporter(time.Second, addr, nullLogger())
+	e.Records = []Record{soaRecord()}
+
+	expected := `
+# HELP dnssec_zone_record_earliest_rrsig_expiry Earliest expiring RRSIG covering the record on resolver in unixtime
+# TYPE dnssec_zone_record_earliest_rrsig_expiry gauge
+dnssec_zone_record_earliest_rrsig_expiry{record="@",resolver="` + addr[0] + `",type="SOA",zone="example.org"} 2e+09
+# HELP dnssec_zone_record_resolves Does the record resolve using the specified DNSSEC enabled resolvers
+# TYPE dnssec_zone_record_resolves gauge
+dnssec_zone_record_resolves{record="@",resolver="` + addr[0] + `",type="SOA",zone="example.org"} 0
+`
+
+	if err := testutil.CollectAndCompare(e, strings.NewReader(expected),
+		"dnssec_zone_record_earliest_rrsig_expiry", "dnssec_zone_record_resolves"); err != nil {
+		t.Fatalf("unexpected metrics: %v", err)
 	}
 
 }

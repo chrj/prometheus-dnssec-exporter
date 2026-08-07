@@ -162,8 +162,10 @@ func (e *Exporter) collectRecord(ctx context.Context, ch chan<- prometheus.Metri
 		resolver, rec.Zone, rec.Record, rec.Type,
 	)
 
-	// Only report the signature expiry if the record resolves.
-	if resolves {
+	// Authoritative servers serve RRSIGs but never set the AD bit, because they
+	// do not validate. Report the expiry whenever the response carried an RRSIG
+	// so those servers can be monitored too.
+	if !expires.IsZero() {
 		ch <- prometheus.MustNewConstMetric(
 			e.expiry, prometheus.GaugeValue, float64(expires.Unix()),
 			resolver, rec.Zone, rec.Record, rec.Type,
