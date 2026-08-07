@@ -6,6 +6,9 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -405,6 +408,124 @@ func TestParseResolvers(t *testing.T) {
 				t.Fatalf("parseResolvers(%q) = %v, want %v", tt.list, got, tt.want)
 			}
 		})
+	}
+
+}
+
+func TestLoadExporter(t *testing.T) {
+
+	tests := []struct {
+		name        string
+		data        string
+		wantRecords []Record
+		wantErr     string
+	}{
+		{
+			name: "sample configuration",
+			data: `
+[[records]]
+  zone = "ietf.org"
+  record = "@"
+  type = "SOA"
+
+[[records]]
+  zone = "verisigninc.com"
+  record = "@"
+  type = "SOA"
+`,
+			wantRecords: []Record{
+				{Zone: "ietf.org", Record: "@", Type: "SOA"},
+				{Zone: "verisigninc.com", Record: "@", Type: "SOA"},
+			},
+		},
+		{
+			name: "comments and mixed quoting",
+			data: `
+# check the apex
+[[records]]
+  zone = 'example.org'
+  record = "@"
+  type = "SOA"
+`,
+			wantRecords: []Record{{Zone: "example.org", Record: "@", Type: "SOA"}},
+		},
+		{
+			name: "misspelled key",
+			data: `
+[[records]]
+  zne = "example.org"
+  record = "@"
+  type = "SOA"
+`,
+			wantErr: "unknown keys",
+		},
+		{
+			name:    "syntax error",
+			data:    "[[records]\n",
+			wantErr: "parse configuration file",
+		},
+		{
+			name:    "no records",
+			data:    "\n",
+			wantErr: "no records configured",
+		},
+		{
+			name: "unknown record type",
+			data: `
+[[records]]
+  zone = "example.org"
+  record = "@"
+  type = "NOPE"
+`,
+			wantErr: "unknown type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "dnssec-checks")
+
+			if err := os.WriteFile(path, []byte(tt.data), 0o600); err != nil {
+				t.Fatalf("couldn't write configuration file: %v", err)
+			}
+
+			e, err := loadExporter(path, time.Second, []string{"127.0.0.1:53"}, nullLogger())
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected an error that contains %q, got nil", tt.wantErr)
+				}
+
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected an error that contains %q, got: %v", tt.wantErr, err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+
+			if !slices.Equal(e.Records, tt.wantRecords) {
+				t.Fatalf("records = %v, want %v", e.Records, tt.wantRecords)
+			}
+		})
+	}
+
+}
+
+func TestLoadExporterMissingFile(t *testing.T) {
+
+	path := filepath.Join(t.TempDir(), "does-not-exist")
+
+	_, err := loadExporter(path, time.Second, []string{"127.0.0.1:53"}, nullLogger())
+	if err == nil {
+		t.Fatal("expected an error for a missing configuration file")
+	}
+
+	if !strings.Contains(err.Error(), "open configuration file") {
+		t.Fatalf("expected an error about opening the file, got: %v", err)
 	}
 
 }

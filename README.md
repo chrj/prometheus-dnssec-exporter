@@ -110,6 +110,10 @@ Supply a configuration file path with `-config` (optionally, defaults to `/etc/d
 
 [Sample configuration file](config.sample)
 
+The exporter rejects a key that it does not know, and names it in the error. A
+misspelled key is therefore an error at start, not a record that is silently not
+checked.
+
 ## Prometheus target
 
 Supply a listen address with `-listen-address` (optional, defaults to `:9204`), and configure a Prometheus job:
