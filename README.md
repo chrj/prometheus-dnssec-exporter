@@ -4,7 +4,7 @@ Check for validity and expiration in DNSSEC signatures and expose metrics for Pr
 
 ## Installation
 
-    $ go get -u github.com/chrj/prometheus-dnssec-exporter
+    $ go install github.com/chrj/prometheus-dnssec-exporter@latest
 
 ## Usage
 
@@ -18,6 +18,16 @@ Check for validity and expiration in DNSSEC signatures and expose metrics for Pr
       -timeout duration
         	Timeout for network operations (default 10s)
 
+You can give resolvers with or without a port. `8.8.8.8` and `8.8.8.8:53` are
+equal.
+
+The exporter reads its configuration file once at start. If the file is missing,
+has a syntax error, or lists a record with an unknown type, the exporter stops
+with an error.
+
+The exporter stops on `SIGINT` or `SIGTERM`. Scrapes that are in progress get up
+to 10 seconds to finish.
+
 ## Metrics
 
 ### Gauge: `dnssec_zone_record_days_left`
@@ -30,11 +40,12 @@ Labels:
 * `record`
 * `type`
 
-If more than one resolver is configured, the metric will be calculated from the
-resolver that is configured first.  If more than one RRSIG covers the record,
-the number of days until the first one expires will be returned.  If the record
-is not signed of the signature cannot be validated, this metric will contain a
-bogus timestamp.
+The exporter calculates this metric from the first resolver in the list. If more
+than one RRSIG covers the record, this metric shows the days until the first
+expiration.
+
+If the resolver gives no answer, or the answer has no RRSIG, this metric is
+absent. The exporter does not report a value that it cannot measure.
 
 ### Gauge: `dnssec_zone_record_earliest_rrsig_expiry`
 
@@ -47,9 +58,16 @@ Labels:
 * `record`
 * `type`
 
-If more than one RRSIG covers the record, the expiration time returned will be
-of the one that expires earliest.  If the record does not resolve or cannot be
-validated, this metric will be absent.
+If more than one RRSIG covers the record, this metric shows the earliest
+expiration.
+
+The exporter reports this metric for every answer that has an RRSIG. It also
+reports it when the resolver does not set the AD bit. Authoritative servers do
+not validate, so you can point `-resolvers` at one and still monitor signature
+expiration.
+
+If the resolver gives no answer, or the answer has no RRSIG, this metric is
+absent.
 
 ### Gauge: `dnssec_zone_record_resolves`
 
@@ -62,7 +80,10 @@ Labels:
 * `record`
 * `type`
 
-This metric will return 1 only if the record resolves **and** validates.
+This metric is 1 only when the record resolves **and** validates.
+
+An authoritative server does not validate, so it never sets the AD bit. This
+metric stays 0 when you use an authoritative server as a resolver.
 
 ### Examples
 
@@ -91,7 +112,7 @@ Supply a configuration file path with `-config` (optionally, defaults to `/etc/d
 
 ## Prometheus target
 
-Supply a listen address with `-addr` (optionally, defaults to `:9204`), and configure a Prometheus job:
+Supply a listen address with `-listen-address` (optional, defaults to `:9204`), and configure a Prometheus job:
 
     - job_name: "dnssec"
       scrape_interval: "1m"
@@ -101,4 +122,9 @@ Supply a listen address with `-addr` (optionally, defaults to `:9204`), and conf
 
 ## Prometheus alert
 
-The real benefit is getting an alert triggered when a signature is nearing expiration or is not longer valid. Check this [sample alert definition](dnssec.rules).
+The real benefit is an alert when a signature is near expiration, or is no longer
+valid. See this [sample alert definition](dnssec.rules).
+
+The sample alerts use a `for` window of 15 minutes. A shorter window pages on a
+single failed scrape, because a temporary resolver failure makes the metric
+absent.
