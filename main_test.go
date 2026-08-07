@@ -285,6 +285,65 @@ dnssec_zone_record_resolves{record="@",resolver="` + addr[0] + `",type="SOA",zon
 
 }
 
+// A record without an RRSIG must not report a days_left value at all. Reporting
+// a bogus one made transient failures page immediately.
+func TestNoDaysLeftWithoutSignature(t *testing.T) {
+
+	addr, cancel := runServer(t, opts{
+		noedns0support: true,
+	})
+
+	defer cancel()
+
+	e := NewDNSSECExporter(time.Second, addr, nullLogger())
+	e.Records = []Record{soaRecord()}
+
+	count := testutil.CollectAndCount(e, "dnssec_zone_record_days_left")
+	if count != 0 {
+		t.Fatalf("expected no days_left series, got %d", count)
+	}
+
+}
+
+// An unreachable resolver must leave every signature metric absent rather than
+// emitting a stale or bogus value.
+func TestUnreachableResolverReportsOnlyResolves(t *testing.T) {
+
+	// Port 1 on the loopback address refuses connections immediately.
+	e := NewDNSSECExporter(time.Second, []string{"127.0.0.1:1"}, nullLogger())
+	e.Records = []Record{soaRecord()}
+
+	expected := `
+# HELP dnssec_zone_record_resolves Does the record resolve using the specified DNSSEC enabled resolvers
+# TYPE dnssec_zone_record_resolves gauge
+dnssec_zone_record_resolves{record="@",resolver="127.0.0.1:1",type="SOA",zone="example.org"} 0
+`
+
+	if err := testutil.CollectAndCompare(e, strings.NewReader(expected)); err != nil {
+		t.Fatalf("unexpected metrics: %v", err)
+	}
+
+}
+
+func TestCollectUsesFirstResolverForDaysLeft(t *testing.T) {
+
+	addr, cancel := runServer(t, opts{})
+	defer cancel()
+
+	// The second resolver refuses connections, so only the first can contribute.
+	e := NewDNSSECExporter(time.Second, []string{addr[0], "127.0.0.1:1"}, nullLogger())
+	e.Records = []Record{soaRecord()}
+
+	if count := testutil.CollectAndCount(e, "dnssec_zone_record_days_left"); count != 1 {
+		t.Fatalf("expected exactly one days_left series, got %d", count)
+	}
+
+	if count := testutil.CollectAndCount(e, "dnssec_zone_record_resolves"); count != 2 {
+		t.Fatalf("expected a resolves series per resolver, got %d", count)
+	}
+
+}
+
 func TestHostname(t *testing.T) {
 
 	tests := []struct {

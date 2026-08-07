@@ -162,19 +162,22 @@ func (e *Exporter) collectRecord(ctx context.Context, ch chan<- prometheus.Metri
 		resolver, rec.Zone, rec.Record, rec.Type,
 	)
 
+	// Without an RRSIG there is nothing to measure, so leave both signature
+	// metrics absent rather than reporting a value derived from the zero time.
+	if expires.IsZero() {
+		return
+	}
+
 	// Authoritative servers serve RRSIGs but never set the AD bit, because they
 	// do not validate. Report the expiry whenever the response carried an RRSIG
 	// so those servers can be monitored too.
-	if !expires.IsZero() {
-		ch <- prometheus.MustNewConstMetric(
-			e.expiry, prometheus.GaugeValue, float64(expires.Unix()),
-			resolver, rec.Zone, rec.Record, rec.Type,
-		)
-	}
+	ch <- prometheus.MustNewConstMetric(
+		e.expiry, prometheus.GaugeValue, float64(expires.Unix()),
+		resolver, rec.Zone, rec.Record, rec.Type,
+	)
 
 	// For compatibility with historical behaviour, record_days_left reports the
 	// time until the earliest RRSIG expiration on the first configured resolver.
-	// This value is bogus if that resolver fails to resolve and validate.
 	if resolver == e.resolvers[0] {
 		ch <- prometheus.MustNewConstMetric(
 			e.daysLeft, prometheus.GaugeValue, time.Until(expires).Hours()/24,
