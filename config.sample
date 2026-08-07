@@ -7,3 +7,21 @@
   zone = "verisigninc.com"
   record = "@"
   type = "SOA"
+
+# A zone is transferred with AXFR. The exporter reports the record in the zone
+# whose signature expires first.
+
+#[[zones]]
+#  zone = "example.com"
+#  # The server to transfer from. Defaults to the first -resolvers entry.
+#  server = "ns1.example.com:53"
+#  key = "mysecretkey."
+
+# A key authenticates a zone transfer with TSIG. Give the key file the same
+# protection as any other secret.
+
+#[[keys]]
+#  name = "mysecretkey."
+#  algorithm = "hmac-sha256."
+#  # From tsig-keygen(1)
+#  secret = "mvgDxfYTSe8L+pp7h4r+PIeTc67YTPhGWZrhmIi2Rpo="

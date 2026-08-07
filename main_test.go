@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
@@ -347,6 +349,478 @@ func TestCollectUsesFirstResolverForDaysLeft(t *testing.T) {
 
 }
 
+// zoneOpts configures the AXFR test server.
+type zoneOpts struct {
+	// expirations are the RRSIG expiration times to serve, one signed A record
+	// each, named a0, a1 and so on.
+	expirations []time.Time
+
+	// tsigSecret, when set, makes the server require and check a TSIG.
+	tsigSecret map[string]string
+
+	// refuse makes the server answer AXFR with REFUSED.
+	refuse bool
+
+	// unsigned serves the zone without any RRSIG.
+	unsigned bool
+}
+
+// runZoneServer serves example.com over AXFR. It returns the server address and
+// a function that stops it.
+func runZoneServer(t *testing.T, opts zoneOpts) (string, func()) {
+
+	const zone = "example.com."
+
+	dnskey := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Algorithm: dns.ECDSAP256SHA256,
+		Flags:     dns.ZONE,
+		Protocol:  3,
+	}
+
+	privkey, err := dnskey.Generate(256)
+	if err != nil {
+		t.Fatalf("couldn't generate private key: %v", err)
+	}
+
+	soa := &dns.SOA{
+		Hdr:     dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 3600},
+		Ns:      "ns1." + zone,
+		Mbox:    "test." + zone,
+		Serial:  1,
+		Refresh: 14400,
+		Retry:   3600,
+		Expire:  7200,
+		Minttl:  60,
+	}
+
+	records := []dns.RR{soa}
+
+	for i, expires := range opts.expirations {
+		name := fmt.Sprintf("a%d.%s", i, zone)
+
+		a := &dns.A{
+			Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+			A:   net.IPv4(127, 0, 0, byte(i+1)),
+		}
+
+		records = append(records, a)
+
+		if opts.unsigned {
+			continue
+		}
+
+		rrsig := &dns.RRSIG{
+			Hdr:         dns.RR_Header{Name: name, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+			TypeCovered: dns.TypeA,
+			Algorithm:   dnskey.Algorithm,
+			Labels:      uint8(dns.CountLabel(name)),
+			OrigTtl:     3600,
+			Expiration:  uint32(expires.Unix()),
+			Inception:   uint32(time.Now().Add(-time.Hour).Unix()),
+			KeyTag:      dnskey.KeyTag(),
+			SignerName:  zone,
+		}
+
+		if err := rrsig.Sign(privkey.(*ecdsa.PrivateKey), []dns.RR{a}); err != nil {
+			t.Fatalf("couldn't sign %s: %v", name, err)
+		}
+
+		records = append(records, rrsig)
+	}
+
+	// A zone transfer ends with the SOA repeated.
+	records = append(records, soa)
+
+	h := dns.NewServeMux()
+	h.HandleFunc(zone, func(rw dns.ResponseWriter, msg *dns.Msg) {
+
+		if opts.refuse {
+			reply := &dns.Msg{}
+			reply.SetRcode(msg, dns.RcodeRefused)
+
+			if err := rw.WriteMsg(reply); err != nil {
+				t.Errorf("couldn't write refusal: %v", err)
+			}
+
+			return
+		}
+
+		tr := &dns.Transfer{}
+		envelopes := make(chan *dns.Envelope)
+
+		go func() {
+			envelopes <- &dns.Envelope{RR: records}
+			close(envelopes)
+		}()
+
+		if err := tr.Out(rw, msg, envelopes); err != nil {
+			t.Errorf("couldn't write zone: %v", err)
+		}
+
+	})
+
+	var lc net.ListenConfig
+
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+
+	server := &dns.Server{
+		Listener:   ln,
+		Handler:    h,
+		TsigSecret: opts.tsigSecret,
+	}
+
+	go func() {
+		_ = server.ActivateAndServe()
+	}()
+
+	done := make(chan bool)
+
+	go func() {
+		<-done
+		_ = server.Shutdown()
+		_ = ln.Close()
+	}()
+
+	return ln.Addr().String(), func() { done <- true }
+
+}
+
+// zoneExporter builds an exporter for a single zone and runs Validate, so the
+// key index is built the same way it is at start.
+func zoneExporter(t *testing.T, zone Zone, keys []Key) *Exporter {
+
+	e := NewDNSSECExporter(2*time.Second, []string{"127.0.0.1:53"}, nullLogger())
+	e.Zones = []Zone{zone}
+	e.Keys = keys
+
+	if err := e.Validate(); err != nil {
+		t.Fatalf("expected a valid configuration, got: %v", err)
+	}
+
+	return e
+}
+
+// The exporter must report the record in the zone that expires first, not the
+// first record it happens to read.
+func TestZoneTransferReportsEarliestSignature(t *testing.T) {
+
+	addr, cancel := runZoneServer(t, zoneOpts{
+		expirations: []time.Time{
+			time.Unix(2100000000, 0),
+			time.Unix(2000000000, 0), // the earliest
+			time.Unix(2200000000, 0),
+		},
+	})
+
+	defer cancel()
+
+	e := zoneExporter(t, Zone{Zone: "example.com", Server: addr}, nil)
+
+	expected := `
+# HELP dnssec_zone_record_earliest_rrsig_expiry Earliest expiring RRSIG covering the record on resolver in unixtime
+# TYPE dnssec_zone_record_earliest_rrsig_expiry gauge
+dnssec_zone_record_earliest_rrsig_expiry{record="a1.example.com.",resolver="` + addr + `",type="A",zone="example.com"} 2e+09
+# HELP dnssec_zone_transfer_success Did the zone transfer from the configured server succeed
+# TYPE dnssec_zone_transfer_success gauge
+dnssec_zone_transfer_success{server="` + addr + `",zone="example.com"} 1
+`
+
+	if err := testutil.CollectAndCompare(e, strings.NewReader(expected),
+		"dnssec_zone_record_earliest_rrsig_expiry", "dnssec_zone_transfer_success"); err != nil {
+		t.Fatalf("unexpected metrics: %v", err)
+	}
+
+}
+
+func TestZoneTransferWithTSIG(t *testing.T) {
+
+	const (
+		keyName   = "testkey."
+		keySecret = "mvgDxfYTSe8L+pp7h4r+PIeTc67YTPhGWZrhmIi2Rpo="
+	)
+
+	addr, cancel := runZoneServer(t, zoneOpts{
+		expirations: []time.Time{time.Unix(2000000000, 0)},
+		tsigSecret:  map[string]string{keyName: keySecret},
+	})
+
+	defer cancel()
+
+	e := zoneExporter(t,
+		Zone{Zone: "example.com", Server: addr, Key: keyName},
+		[]Key{{Name: keyName, Algorithm: "hmac-sha256", Secret: keySecret}},
+	)
+
+	if got := testutil.ToFloat64(collectOne(t, e, "dnssec_zone_transfer_success")); got != 1 {
+		t.Fatalf("transfer_success = %v, want 1", got)
+	}
+
+}
+
+// A transfer signed with the wrong secret must fail, and must not report a
+// signature that the exporter never authenticated.
+func TestZoneTransferWrongTSIGSecret(t *testing.T) {
+
+	const keyName = "testkey."
+
+	addr, cancel := runZoneServer(t, zoneOpts{
+		expirations: []time.Time{time.Unix(2000000000, 0)},
+		tsigSecret:  map[string]string{keyName: "mvgDxfYTSe8L+pp7h4r+PIeTc67YTPhGWZrhmIi2Rpo="},
+	})
+
+	defer cancel()
+
+	e := zoneExporter(t,
+		Zone{Zone: "example.com", Server: addr, Key: keyName},
+		[]Key{{Name: keyName, Algorithm: "hmac-sha256", Secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
+	)
+
+	expected := `
+# HELP dnssec_zone_transfer_success Did the zone transfer from the configured server succeed
+# TYPE dnssec_zone_transfer_success gauge
+dnssec_zone_transfer_success{server="` + addr + `",zone="example.com"} 0
+`
+
+	if err := testutil.CollectAndCompare(e, strings.NewReader(expected)); err != nil {
+		t.Fatalf("unexpected metrics: %v", err)
+	}
+
+}
+
+// A refused transfer must report the failure and leave the signature metrics
+// absent, so an alert cannot read a value that was never measured.
+func TestZoneTransferRefused(t *testing.T) {
+
+	addr, cancel := runZoneServer(t, zoneOpts{refuse: true})
+	defer cancel()
+
+	e := zoneExporter(t, Zone{Zone: "example.com", Server: addr}, nil)
+
+	expected := `
+# HELP dnssec_zone_transfer_success Did the zone transfer from the configured server succeed
+# TYPE dnssec_zone_transfer_success gauge
+dnssec_zone_transfer_success{server="` + addr + `",zone="example.com"} 0
+`
+
+	if err := testutil.CollectAndCompare(e, strings.NewReader(expected)); err != nil {
+		t.Fatalf("unexpected metrics: %v", err)
+	}
+
+}
+
+// An unsigned zone transfers correctly but has nothing to report.
+func TestZoneTransferUnsignedZone(t *testing.T) {
+
+	addr, cancel := runZoneServer(t, zoneOpts{
+		expirations: []time.Time{time.Unix(2000000000, 0)},
+		unsigned:    true,
+	})
+
+	defer cancel()
+
+	e := zoneExporter(t, Zone{Zone: "example.com", Server: addr}, nil)
+
+	if got := testutil.ToFloat64(collectOne(t, e, "dnssec_zone_transfer_success")); got != 1 {
+		t.Fatalf("transfer_success = %v, want 1", got)
+	}
+
+	if count := testutil.CollectAndCount(e, "dnssec_zone_record_earliest_rrsig_expiry"); count != 0 {
+		t.Fatalf("expected no expiry series for an unsigned zone, got %d", count)
+	}
+
+}
+
+// Records and zones must be collectable by the same process. This was the
+// limitation that kept the original change from landing.
+func TestRecordsAndZonesTogether(t *testing.T) {
+
+	recordAddr, cancelRecord := runServer(t, opts{})
+	defer cancelRecord()
+
+	zoneAddr, cancelZone := runZoneServer(t, zoneOpts{
+		expirations: []time.Time{time.Unix(2000000000, 0)},
+	})
+
+	defer cancelZone()
+
+	e := NewDNSSECExporter(2*time.Second, recordAddr, nullLogger())
+	e.Records = []Record{soaRecord()}
+	e.Zones = []Zone{{Zone: "example.com", Server: zoneAddr}}
+
+	if err := e.Validate(); err != nil {
+		t.Fatalf("expected a valid configuration, got: %v", err)
+	}
+
+	// One from the record on its resolver, one from the zone on its own server.
+	if count := testutil.CollectAndCount(e, "dnssec_zone_record_days_left"); count != 2 {
+		t.Fatalf("expected a days_left series for the record and the zone, got %d", count)
+	}
+
+	if count := testutil.CollectAndCount(e, "dnssec_zone_record_resolves"); count != 1 {
+		t.Fatalf("expected one resolves series, got %d", count)
+	}
+
+	if count := testutil.CollectAndCount(e, "dnssec_zone_transfer_success"); count != 1 {
+		t.Fatalf("expected one transfer_success series, got %d", count)
+	}
+
+}
+
+// collectOne gathers the exporter and returns the single metric with the given
+// name, so a test can read its value.
+func collectOne(t *testing.T, e *Exporter, name string) prometheus.Gauge {
+
+	reg := prometheus.NewPedanticRegistry()
+	if err := reg.Register(e); err != nil {
+		t.Fatalf("couldn't register exporter: %v", err)
+	}
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("couldn't gather metrics: %v", err)
+	}
+
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+
+		if len(family.GetMetric()) != 1 {
+			t.Fatalf("expected one %s series, got %d", name, len(family.GetMetric()))
+		}
+
+		g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "proxy"})
+		g.Set(family.GetMetric()[0].GetGauge().GetValue())
+
+		return g
+	}
+
+	t.Fatalf("metric %s was not reported", name)
+
+	return nil
+
+}
+
+func TestValidateKeysAndZones(t *testing.T) {
+
+	tests := []struct {
+		name    string
+		zones   []Zone
+		keys    []Key
+		wantErr string
+	}{
+		{
+			name:  "zone without a key",
+			zones: []Zone{{Zone: "example.com", Server: "127.0.0.1:53"}},
+		},
+		{
+			name:  "zone with a key",
+			zones: []Zone{{Zone: "example.com", Key: "k."}},
+			keys:  []Key{{Name: "k.", Algorithm: "hmac-sha256", Secret: "c2VjcmV0"}},
+		},
+		{
+			name:  "key name without a trailing dot still matches",
+			zones: []Zone{{Zone: "example.com", Key: "k"}},
+			keys:  []Key{{Name: "k", Algorithm: "hmac-sha256", Secret: "c2VjcmV0"}},
+		},
+		{
+			name:    "zone names a key that does not exist",
+			zones:   []Zone{{Zone: "example.com", Key: "missing."}},
+			wantErr: "which no [[keys]] section defines",
+		},
+		{
+			name:    "zone without a name",
+			zones:   []Zone{{Server: "127.0.0.1:53"}},
+			wantErr: "a zone has no name",
+		},
+		{
+			name:    "duplicate zone",
+			zones:   []Zone{{Zone: "example.com"}, {Zone: "example.com."}},
+			wantErr: "configured more than once",
+		},
+		{
+			name:    "server without a port",
+			zones:   []Zone{{Zone: "example.com", Server: "127.0.0.1"}},
+			wantErr: "needs a port",
+		},
+		{
+			name:    "key without a secret",
+			zones:   []Zone{{Zone: "example.com"}},
+			keys:    []Key{{Name: "k.", Algorithm: "hmac-sha256"}},
+			wantErr: "has no secret",
+		},
+		{
+			name:    "key with an unknown algorithm",
+			zones:   []Zone{{Zone: "example.com"}},
+			keys:    []Key{{Name: "k.", Algorithm: "hmac-nope", Secret: "c2VjcmV0"}},
+			wantErr: "unknown algorithm",
+		},
+		{
+			name:    "duplicate key",
+			zones:   []Zone{{Zone: "example.com"}},
+			keys:    []Key{{Name: "k.", Algorithm: "hmac-sha256", Secret: "c2VjcmV0"}, {Name: "k", Algorithm: "hmac-sha256", Secret: "c2VjcmV0"}},
+			wantErr: "configured more than once",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := NewDNSSECExporter(time.Second, []string{"127.0.0.1:53"}, nullLogger())
+			e.Zones = tt.zones
+			e.Keys = tt.keys
+
+			err := e.Validate()
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected an error that contains %q, got nil", tt.wantErr)
+				}
+
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected an error that contains %q, got: %v", tt.wantErr, err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+		})
+	}
+
+}
+
+// A TSIG secret must never reach a log line or an error message.
+func TestKeyDoesNotLeakSecret(t *testing.T) {
+
+	const secret = "mvgDxfYTSe8L+pp7h4r+PIeTc67YTPhGWZrhmIi2Rpo="
+
+	key := Key{Name: "k.", Algorithm: "hmac-sha256.", Secret: secret}
+
+	var buf strings.Builder
+
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logger.Info("using key", "key", key)
+
+	if strings.Contains(buf.String(), secret) {
+		t.Fatalf("the log line contains the secret: %s", buf.String())
+	}
+
+	if strings.Contains(key.String(), secret) {
+		t.Fatalf("String() contains the secret: %s", key.String())
+	}
+
+	if strings.Contains(fmt.Sprintf("%v", key), secret) {
+		t.Fatalf("the formatted value contains the secret: %v", key)
+	}
+
+}
+
 func TestHostname(t *testing.T) {
 
 	tests := []struct {
@@ -465,9 +939,9 @@ func TestLoadExporter(t *testing.T) {
 			wantErr: "parse configuration file",
 		},
 		{
-			name:    "no records",
+			name:    "nothing configured",
 			data:    "\n",
-			wantErr: "no records configured",
+			wantErr: "nothing configured to check",
 		},
 		{
 			name: "unknown record type",
@@ -511,6 +985,55 @@ func TestLoadExporter(t *testing.T) {
 				t.Fatalf("records = %v, want %v", e.Records, tt.wantRecords)
 			}
 		})
+	}
+
+}
+
+// The configuration file must carry zones and keys through to the exporter. The
+// strict check on unknown settings rejects a table that the schema forgets, so
+// leaving one out turns a working file into a start-up error.
+func TestLoadExporterReadsZonesAndKeys(t *testing.T) {
+
+	data := `
+[[records]]
+  zone = "example.org"
+  record = "@"
+  type = "SOA"
+
+[[zones]]
+  zone = "example.com"
+  server = "127.0.0.1:5353"
+  key = "mysecretkey."
+
+[[keys]]
+  name = "mysecretkey."
+  algorithm = "hmac-sha256."
+  secret = "mvgDxfYTSe8L+pp7h4r+PIeTc67YTPhGWZrhmIi2Rpo="
+`
+
+	path := filepath.Join(t.TempDir(), "dnssec-checks")
+
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("couldn't write configuration file: %v", err)
+	}
+
+	e, err := loadExporter(path, time.Second, []string{"127.0.0.1:53"}, nullLogger())
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	wantZones := []Zone{{Zone: "example.com", Server: "127.0.0.1:5353", Key: "mysecretkey."}}
+	if !slices.Equal(e.Zones, wantZones) {
+		t.Fatalf("zones = %v, want %v", e.Zones, wantZones)
+	}
+
+	if len(e.Keys) != 1 || e.Keys[0].Name != "mysecretkey." {
+		t.Fatalf("keys = %v, want one key named mysecretkey.", e.Keys)
+	}
+
+	// Validate indexes the keys, so the zone must find the one it names.
+	if _, ok := e.keys["mysecretkey."]; !ok {
+		t.Fatalf("the key index does not hold mysecretkey.: %v", e.keys)
 	}
 
 }
