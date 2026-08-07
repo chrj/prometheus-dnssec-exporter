@@ -1,6 +1,6 @@
 module github.com/chrj/prometheus-dnssec-exporter
 
-go 1.26.2
+go 1.26.5
 
 require (
 	github.com/miekg/dns v1.1.72
