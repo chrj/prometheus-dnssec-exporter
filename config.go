@@ -220,7 +220,7 @@ type config struct {
 
 // loadExporter reads the configuration file and returns a validated exporter.
 func loadExporter(path string, timeout time.Duration, resolvers []string, logger *slog.Logger) (*Exporter, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- the operator names this file with the -config flag
 	if err != nil {
 		return nil, fmt.Errorf("open configuration file %s: %w", path, err)
 	}

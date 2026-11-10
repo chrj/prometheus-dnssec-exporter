@@ -75,10 +75,6 @@ jobs:
           cache: false
 
       - name: Run gosec
-        # gosec cannot read the export data of Go 1.27.2.
-        # Remove this override when a gosec release can read it.
-        env:
-          GOTOOLCHAIN: go1.27.1
         run: |
-          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
+          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
           gosec -exclude-generated ./...
