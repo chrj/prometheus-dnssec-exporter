@@ -65,7 +65,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	serveErr := make(chan error, 1)
 
 	go func() {
-		logger.Info("listening", "address", *addr, "records", len(exporter.Records), "resolvers", r)
+		logger.Info("listening", "address", *addr, "records", len(exporter.Records), "chains", len(exporter.Chains), "resolvers", r)
 		serveErr <- srv.ListenAndServe()
 	}()
 

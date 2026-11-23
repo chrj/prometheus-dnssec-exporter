@@ -25,3 +25,14 @@
 #  algorithm = "hmac-sha256."
 #  # From tsig-keygen(1)
 #  secret = "mvgDxfYTSe8L+pp7h4r+PIeTc67YTPhGWZrhmIi2Rpo="
+
+# A chain follows the chain of trust of one zone, from the DS records at the
+# parent to the keys and signatures on each of the zone's servers. Every query
+# goes straight to an authoritative server, no resolver is involved.
+
+#[[chains]]
+#  zone = "example.com"
+#  # The authoritative servers of the parent zone, where the DS records live.
+#  parent_servers = ["a.gtld-servers.net:53", "b.gtld-servers.net:53"]
+#  # The authoritative servers of the zone itself.
+#  servers = ["ns1.example.com:53", "ns2.example.com:53"]

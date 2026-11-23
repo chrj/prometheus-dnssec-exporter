@@ -83,6 +83,31 @@ transfer, a wrong TSIG key, or a server that cannot be reached makes it 0.
 
 The exporter reports this metric only for a `[[zones]]` entry.
 
+### Chain metrics
+
+A `[[chains]]` entry reports these gauges. Every query goes straight to an
+authoritative server, without recursion, so no resolver cache is involved.
+
+* `dnssec_chain_query_success{server,zone}`: did the server answer. Reported for
+  every parent server and every server of the zone.
+* `dnssec_chain_ds_records{zone}`: the number of DS records at the parent, from
+  the first parent server that answered. 0 means the zone is not anchored.
+* `dnssec_chain_dnskey_records{server,zone}`: the number of DNSKEY records the
+  server publishes.
+* `dnssec_chain_ds_match{server,zone}`: 1 when a DS record at the parent matches
+  a DNSKEY on the server by its digest, and that key signs the DNSKEY RRset with
+  a signature that verifies and is valid now. A matching key tag alone does not
+  count.
+* `dnssec_chain_soa_signature_valid{server,zone}`: 1 when the SOA carries a
+  signature from one of the server's DNSKEYs that verifies and is valid now.
+* `dnssec_chain_earliest_rrsig_expiry{server,zone}`: the earliest expiration of
+  the RRSIGs over the DNSKEY and SOA RRsets, in unixtime.
+
+When a server does not answer, only `dnssec_chain_query_success` is reported for
+it. When no parent server answers, `dnssec_chain_ds_records` and
+`dnssec_chain_ds_match` are absent, so an outage at the parent does not look like
+a broken chain.
+
 ### Gauge: `dnssec_zone_record_resolves`
 
 Does the record resolve using the specified DNSSEC enabled resolvers.
@@ -149,6 +174,28 @@ entry. Give each zone its own server to check zones on your authoritative
 servers and records on public resolvers in the same process.
 
 `key` is optional. It names a `[[keys]]` entry that signs the transfer with TSIG.
+
+### Chains
+
+A `[[chains]]` entry follows the chain of trust of one zone: the DS records at
+the parent, the DNSKEY RRset on each of the zone's servers, and the signatures
+over the DNSKEY and SOA RRsets. Use this to catch a DS that points to a key the
+zone no longer publishes. A validating resolver can keep answering with the AD
+bit set from its cache until the cached records expire, so a check through a
+resolver stays green in that case.
+
+    [[chains]]
+      zone = "example.com"
+      parent_servers = ["a.gtld-servers.net:53", "b.gtld-servers.net:53"]
+      servers = ["ns1.example.com:53", "ns2.example.com:53"]
+
+`parent_servers` are the authoritative servers of the parent zone, where the DS
+records live. `servers` are the authoritative servers of the zone itself. Both
+need a port. The exporter checks every server in `servers` on its own, so one
+server with an old key set shows up in the metrics.
+
+The exporter trusts the DS answer of the parent servers you configure. It does
+not validate the parent's own signatures.
 
 ### Keys
 
