@@ -38,3 +38,30 @@ groups:
     annotations:
       description: The DNSSEC exporter reported no records for 15 minutes. Check that the exporter runs and that its configuration file lists the expected records.
       title: The DNSSEC exporter is not reporting any records
+  # The [[chains]] checks. A DS that matches no key on a server breaks
+  # validation for every client that asks that server, even while resolvers
+  # with a cached key still validate.
+  - alert: DNSSECChainBroken
+    expr: dnssec_chain_ds_match == 0
+    for: 15m
+    labels:
+      urgency: immediate
+    annotations:
+      description: No DS record at the parent of {{$labels.zone}} matches a DNSKEY on {{$labels.server}} that validly signs the DNSKEY RRset.
+      title: The DNSSEC chain of trust for {{$labels.zone}} is broken on {{$labels.server}}
+  - alert: DNSSECChainSOASignatureInvalid
+    expr: dnssec_chain_soa_signature_valid == 0
+    for: 15m
+    labels:
+      urgency: immediate
+    annotations:
+      description: The SOA of {{$labels.zone}} on {{$labels.server}} has no valid signature from one of the zone's keys.
+      title: The SOA signature of {{$labels.zone}} on {{$labels.server}} is invalid
+  - alert: DNSSECChainQueryFailed
+    expr: dnssec_chain_query_success == 0
+    for: 15m
+    labels:
+      urgency: warning
+    annotations:
+      description: The exporter got no answer from {{$labels.server}} for {{$labels.zone}}. The chain is not checked on this server while the query fails.
+      title: The chain check for {{$labels.zone}} cannot reach {{$labels.server}}

@@ -16,12 +16,14 @@ import (
 type Exporter struct {
 	Records []Record
 	Zones   []Zone
+	Chains  []Chain
 	Keys    []Key
 
 	daysLeft  *prometheus.Desc
 	resolves  *prometheus.Desc
 	expiry    *prometheus.Desc
 	transfers *prometheus.Desc
+	chain     chainMetrics
 
 	// keys indexes Keys by name, so a zone can name the key it needs.
 	keys map[string]Key
@@ -61,6 +63,7 @@ func NewDNSSECExporter(timeout time.Duration, resolvers []string, logger *slog.L
 			[]string{"server", "zone"},
 			nil,
 		),
+		chain: newChainMetrics(),
 		dnsClient: &dns.Client{
 			Net:     "tcp",
 			Timeout: timeout,
@@ -76,6 +79,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- e.resolves
 	ch <- e.expiry
 	ch <- e.transfers
+	e.chain.describe(ch)
 }
 
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
@@ -95,6 +99,12 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	for _, zone := range e.Zones {
 		wg.Go(func() {
 			e.collectZone(ctx, ch, zone)
+		})
+	}
+
+	for _, chain := range e.Chains {
+		wg.Go(func() {
+			e.collectChain(ctx, ch, chain)
 		})
 	}
 

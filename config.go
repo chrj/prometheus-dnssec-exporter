@@ -62,8 +62,8 @@ func (k Key) String() string {
 // Validate reports configuration problems that would otherwise show up as
 // missing or duplicated metrics at scrape time.
 func (e *Exporter) Validate() error {
-	if len(e.Records) == 0 && len(e.Zones) == 0 {
-		return errors.New("nothing configured to check: add at least one [[records]] or [[zones]] section")
+	if len(e.Records) == 0 && len(e.Zones) == 0 && len(e.Chains) == 0 {
+		return errors.New("nothing configured to check: add at least one [[records]], [[zones]] or [[chains]] section")
 	}
 
 	if err := e.validateKeys(); err != nil {
@@ -71,6 +71,10 @@ func (e *Exporter) Validate() error {
 	}
 
 	if err := e.validateZones(); err != nil {
+		return err
+	}
+
+	if err := e.validateChains(); err != nil {
 		return err
 	}
 
@@ -215,6 +219,7 @@ func parseResolvers(list string) ([]string, error) {
 type config struct {
 	Records []Record
 	Zones   []Zone
+	Chains  []Chain
 	Keys    []Key
 }
 
@@ -248,6 +253,7 @@ func loadExporter(path string, timeout time.Duration, resolvers []string, logger
 	exporter := NewDNSSECExporter(timeout, resolvers, logger)
 	exporter.Records = cfg.Records
 	exporter.Zones = cfg.Zones
+	exporter.Chains = cfg.Chains
 	exporter.Keys = cfg.Keys
 
 	if err := exporter.Validate(); err != nil {
